@@ -1,0 +1,418 @@
+---
+title: "NS Take-Home Assignment - Bird Challenge"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+
+# Data lives outside the repo (see top-level README). Change data_dir if the files move
+#or you are reproducing from a different environment.
+data_dir <- "/Users/scohen/Documents/NaturalState/Take Home Project"
+bird_dir <- file.path(data_dir, "Data Birds")
+
+predictions <- read_csv(file.path(bird_dir, "birdnet_predictions.csv"))
+validation  <- read_csv(file.path(bird_dir, "validation_results.csv"))
+```
+
+## Contents
+
+1. [Data exploration and summaries](#1-data-exploration-and-summaries)
+    1. [Data schema: `birdnet_predictions.csv`](#11-data-schema-birdnet_predictionscsv)
+    2. [Data schema: `validation_results.csv`](#12-data-schema-validation_resultscsv)
+    3. [Cross-file checks](#13-cross-file-checks)
+    4. [Distributions](#14-distributions)
+
+## 1. Data exploration and summaries
+
+### 1.1 Data schema: `birdnet_predictions.csv`
+
+29,491 rows, 13 fields, no missing values. Each row is one BirdNET *prediction*: one species predicted in one 3-second segment of one audio file, with a confidence score of at least 0.1. The field layout is the Raven selection-table format that BirdNET writes out. Descriptions below are my reading of the data and the take-home assignment description; items marked *(inferred)* are not stated in the description.
+
+| Field | Type | Description | Observed in this dataset |
+|---|---|---|---|
+| `selection` | numeric (integer) | Row counter within a Raven selection table. Restarts for each audio file, so it is **not** a unique ID. *(inferred)* | 1 to 270 |
+| `view` | character | Raven display view the selection was made in. Constant. | Always `Spectrogram 1` |
+| `channel` | numeric (integer) | Audio channel analysed. Constant. | Always `1` |
+| `begin_time_s` | numeric (integer) | Start of the 3-second segment, in seconds from the start of the audio file. | 0 to 3,599 |
+| `end_time_s` | numeric (integer) | End of the segment, in seconds from the start of the file. Always `begin_time_s + 3`. | 3 to 3,602 |
+| `low_freq_hz` | numeric | Lower frequency bound of the analysed band (Hz). Constant. | Always `0` |
+| `high_freq_hz` | numeric | Upper frequency bound of the analysed band (Hz). Constant. | Always `15000` |
+| `common_name` | character | Predicted species (the class). | 4 species: Abyssinian Nightjar, African Black-headed Oriole, Red-billed Firefinch, Three-banded Plover |
+| `species_code` | character | Short code for the predicted species. One-to-one with `common_name`. | 4 codes: species_code: abynig1, abhori1, rebfir2, thbplo1 |
+| `confidence` | numeric | BirdNET confidence score for this species in this segment. **Not a probability**; its meaning differs by species (Wood & Kahl 2024). Predictions below 0.1 were not kept. | 0.1 to 1.0 |
+| `begin_path` | character | Relative path to the source audio file: `Grid/Recorder/Recorder_YYYYMMDD_HHMMSS.WAV`. Encodes the recorder, date and start hour of a 1-hour recording. | 1,696 distinct files, all in `Grid2` |
+| `file_offset_s` | numeric (integer) | Offset of the segment within the file, in seconds. Identical to `begin_time_s` in every row, so redundant. | 0 to 3,599 |
+| `folder` | character | Recorder (device) ID. Matches the recorder folder inside `begin_path`. | 43 recorders (`RBS02`, ...) |
+
+**Key and constants.** No single field identifies a prediction. The combination `begin_path` + `begin_time_s` + `common_name` is unique for all 29,491 rows, and that is the key I will use when labelling. `view`, `channel`, `low_freq_hz` and `high_freq_hz` never vary and carry no information for the analysis.
+
+```{r schema-check}
+# Reproduces the claims above directly from the data
+predictions %>%
+  summarise(
+    rows = n(),
+    missing_cells = sum(is.na(across(everything()))),
+    unique_key_rows = n_distinct(begin_path, begin_time_s, common_name),
+    offset_equals_begin = all(file_offset_s == begin_time_s),
+    segment_is_3s = all(end_time_s - begin_time_s == 3),
+    recorder_matches_path = all(str_split_i(begin_path, "/", 2) == folder)
+  ) %>%
+  pivot_longer(everything())
+```
+
+Predictions per species:
+
+```{r species-counts}
+predictions %>% count(common_name, species_code, sort = TRUE)
+```
+
+#### QC checks: predictions
+
+Each check is computed from the data when this document is knitted. **PASS** means nothing to act on. **FLAG** means a problem I have to handle in the analysis. **INFO** means an oddity to be aware of and record, not necessarily a problem.
+
+```{r qc-predictions, echo=FALSE}
+# One row per check; `flag` is the status shown when the check fails
+qc_row <- function(check, ok, result, flag = "FLAG") {
+  tibble(Check = check, Result = result, Status = if (ok) "PASS" else flag)
+}
+
+pred_n_missing <- sum(is.na(predictions))
+pred_pairs <- n_distinct(predictions$common_name, predictions$species_code)
+pred_ws <- sum(map_int(select(predictions, where(is.character)), ~ sum(.x != str_trim(.x))))
+pred_n_one <- sum(predictions$confidence == 1)
+pred_dup_keys <- nrow(predictions) -
+  n_distinct(predictions$begin_path, predictions$begin_time_s, predictions$common_name)
+pred_overlaps <- predictions %>%
+  arrange(begin_path, common_name, begin_time_s) %>%
+  group_by(begin_path, common_name) %>%
+  summarise(n = sum(begin_time_s - lag(begin_time_s) < 3, na.rm = TRUE), .groups = "drop") %>%
+  summarise(total = sum(n)) %>%
+  pull(total)
+pred_bad_path <- sum(!str_detect(
+  predictions$begin_path,
+  "^Grid[0-9]+/[A-Za-z0-9]+/[A-Za-z0-9]+_[0-9]{8}_[0-9]{6}\\.WAV$"))
+pred_past_hour <- sum(predictions$end_time_s > 3600)
+pred_multi_species <- predictions %>% count(begin_path, begin_time_s) %>% filter(n > 1) %>% nrow()
+
+bind_rows(
+  qc_row("No missing values", pred_n_missing == 0, paste(pred_n_missing, "missing cells")),
+  qc_row("`common_name` and `species_code` map one-to-one",
+         pred_pairs == n_distinct(predictions$common_name) & pred_pairs == n_distinct(predictions$species_code),
+         paste(n_distinct(predictions$common_name), "names,", n_distinct(predictions$species_code),
+               "codes,", pred_pairs, "distinct pairs")),
+  qc_row("No leading/trailing whitespace in text fields", pred_ws == 0, paste(pred_ws, "values affected")),
+  qc_row("`confidence` within 0.1 to 1",
+         min(predictions$confidence) >= 0.1 & max(predictions$confidence) <= 1,
+         paste0("range ", min(predictions$confidence), " to ", max(predictions$confidence))),
+  qc_row("No `confidence` of exactly 1.0 (its logit is infinite)", pred_n_one == 0,
+         paste(pred_n_one, "predictions at 1.0; clip before the logit transform")),
+  qc_row("Key (`begin_path`, `begin_time_s`, `common_name`) is unique", pred_dup_keys == 0,
+         paste(pred_dup_keys, "duplicate keys")),
+  qc_row("Every segment is 3 s long", all(predictions$end_time_s - predictions$begin_time_s == 3),
+         paste(sum(predictions$end_time_s - predictions$begin_time_s != 3), "rows differ")),
+  qc_row("No overlapping segments for the same species in a file", pred_overlaps == 0,
+         paste(pred_overlaps, "overlaps")),
+  qc_row("`begin_path` follows `Grid/Recorder/Recorder_YYYYMMDD_HHMMSS.WAV`", pred_bad_path == 0,
+         paste(pred_bad_path, "paths differ")),
+  qc_row("Recorder in `folder` matches recorder in `begin_path`",
+         all(str_split_i(predictions$begin_path, "/", 2) == predictions$folder), "all rows match"),
+  qc_row("Segments end within a 3,600 s recording", pred_past_hour == 0,
+         paste0(pred_past_hour, " segments end after 3,600 s (latest end ",
+                max(predictions$end_time_s), " s)"), flag = "INFO"),
+  qc_row("One species predicted per segment", pred_multi_species == 0,
+         paste(pred_multi_species, "segments have more than one species"), flag = "INFO")
+) %>%
+  knitr::kable(align = "llc")
+```
+
+**Reading the flags.** The four `confidence` values of exactly 1.0 cannot go through the logit transform (`ln(c / (1 - c))` is infinite), so they need to be clipped to just below 1 OR removed from the data; either way, this will be recoded as a decision with context for the tech team to be aware of. The INFO rows are small oddities: a few segments run up to 2 seconds past the one-hour mark, and 3 segments have predictions for two species, which is another reason the key includes the species.
+
+### 1.2 Data schema: `validation_results.csv`
+
+551 rows, 6 fields, no missing values. Each row is one BirdNET prediction that a human ornithologist listened to and marked correct or incorrect. This is the only file with ground truth, so it is what the threshold model is fitted on. Items marked *(inferred)* are my reading and are not stated in the take-home assignment description.
+
+| Field | Type | Description | Observed in this dataset |
+|---|---|---|---|
+| `scientificName` | character | Scientific (Latin) name of the predicted species. One-to-one with `commonName`. | 4 species: *Caprimulgus poliocephalus*, *Charadrius tricollaris*, *Lagonosticta senegala*, *Oriolus larvatus* |
+| `commonName` | character | Predicted species (the class). Same labels as `common_name` in the predictions file. | 4 species: Abyssinian Nightjar, Three-banded Plover, Red-billed Firefinch, African Black-headed Oriole |
+| `vBirdNET` | character | BirdNET model version that produced the prediction. Constant. | Always `v2.4` |
+| `filename` | character | Name of the validated audio clip: `<confidence>_<n>_<recorder>_<YYYYMMDD>_<HHMMSS>.wav`. The leading number is the confidence score, so clips can be matched to scores (Wood & Kahl 2024). `<n>` is an integer of unknown meaning, possibly a clip index *(inferred)*. Unique per row. | 551 distinct filenames; 32 recorders; dates 2023-06-20 to 2023-07-12 |
+| `confidence` | numeric | BirdNET confidence score for the validated prediction. Identical to the leading number in `filename`. Rounded to 3 decimals, whereas the predictions file keeps 4. | 0.101 to 1.0 |
+| `outcome` | numeric (0/1) | Ornithologist's verdict: `1` = prediction correct (true positive), `0` = incorrect (false positive). This is the response variable. | 422 correct (1), 129 incorrect (0) |
+
+**Notes.**
+
+- The two files have no shared ID, and many validation clips cannot be traced back to a row in the predictions file (some come from recordings that start off the hour, unlike every file in the predictions). This does not affect fitting, which needs only `confidence` and `outcome`, for now flag but follow up with question before deciding. Details are in [1.3](#13-cross-file-checks).
+- Correctness varies hugely by species (see below), which is what makes a single global threshold inappropriate.
+
+```{r validation-schema-check}
+# Reproduces the claims above directly from the data
+validation %>%
+  summarise(
+    rows = n(),
+    missing_cells = sum(is.na(across(everything()))),
+    unique_filenames = n_distinct(filename),
+    one_model_version = n_distinct(vBirdNET) == 1,
+    outcome_is_0_or_1 = all(outcome %in% c(0, 1)),
+    confidence_matches_filename = all(abs(as.numeric(str_extract(filename, "^[0-9.]+")) - confidence) < 1e-9),
+    recorders = n_distinct(str_match(filename, "^[0-9.]+_[0-9]+_([A-Za-z0-9]+)_")[, 2])
+  ) %>%
+  pivot_longer(everything())
+```
+
+Validated clips and correct rate per species:
+
+```{r validation-species}
+validation %>%
+  group_by(commonName, scientificName) %>%
+  summarise(n = n(),
+            n_correct = sum(outcome),
+            pct_correct = round(100 * mean(outcome), 1),
+            min_conf = min(confidence),
+            max_conf = max(confidence),
+            .groups = "drop") %>%
+  arrange(desc(pct_correct)) %>%
+  knitr::kable(
+    col.names = c("Species", "Scientific name", "Clips validated", "Correct",
+                  "% correct", "Lowest score", "Highest score"),
+    align = "llrrrrr"
+  )
+```
+
+**What this shows.** Before fitting anything, this is how well BirdNET's predictions held up when a human checked them. The overall rate (422 of 551, 77%) hides large differences: every Oriole clip was correct, nearly every Plover clip was correct, the Nightjar was in between, and the Firefinch was almost always wrong. The lowest and highest scores show the range of confidence each species was validated across, which limits where a fitted curve can be trusted.
+
+#### QC checks: validation
+
+```{r qc-validation, echo=FALSE}
+val_n_missing <- sum(is.na(validation))
+val_pairs <- n_distinct(validation$scientificName, validation$commonName)
+val_ws <- sum(map_int(select(validation, where(is.character)), ~ sum(.x != str_trim(.x))))
+val_n_one <- sum(validation$confidence == 1)
+val_fn_pattern <- "^[0-9.]+_[0-9]+_[A-Za-z0-9]+_[0-9]{8}_[0-9]{6}\\.wav$"
+val_species_outcomes <- validation %>%
+  group_by(commonName) %>%
+  summarise(n = n(), n_correct = sum(outcome), .groups = "drop")
+val_one_sided <- val_species_outcomes %>% filter(n_correct == 0 | n_correct == n) %>% pull(commonName)
+val_near_one_sided <- val_species_outcomes %>%
+  filter(n_correct %in% c(1, n - 1)) %>% pull(commonName)
+
+bind_rows(
+  qc_row("No missing values", val_n_missing == 0, paste(val_n_missing, "missing cells")),
+  qc_row("`scientificName` and `commonName` map one-to-one",
+         val_pairs == n_distinct(validation$commonName) & val_pairs == n_distinct(validation$scientificName),
+         paste(n_distinct(validation$commonName), "common names,", n_distinct(validation$scientificName),
+               "scientific names,", val_pairs, "distinct pairs")),
+  qc_row("No leading/trailing whitespace in text fields", val_ws == 0, paste(val_ws, "values affected")),
+  qc_row("`outcome` is 0 or 1", all(validation$outcome %in% c(0, 1)),
+         paste(sum(!validation$outcome %in% c(0, 1)), "other values")),
+  qc_row("`filename` is unique", n_distinct(validation$filename) == nrow(validation),
+         paste(nrow(validation) - n_distinct(validation$filename), "duplicates")),
+  qc_row("`filename` follows `confidence_n_Recorder_YYYYMMDD_HHMMSS.wav`",
+         all(str_detect(validation$filename, val_fn_pattern)),
+         paste(sum(!str_detect(validation$filename, val_fn_pattern)), "filenames differ")),
+  qc_row("`confidence` equals the score in `filename`",
+         all(abs(as.numeric(str_extract(validation$filename, "^[0-9.]+")) - validation$confidence) < 1e-9),
+         "all rows match"),
+  qc_row("Single BirdNET version", n_distinct(validation$vBirdNET) == 1,
+         paste(unique(validation$vBirdNET), collapse = ", ")),
+  qc_row("No `confidence` of exactly 1.0 (its logit is infinite)", val_n_one == 0,
+         paste(val_n_one, "clips at 1.0; clip before the logit transform")),
+  qc_row("Every species has both correct and incorrect clips", length(val_one_sided) == 0,
+         paste("all clips have the same outcome for:", paste(val_one_sided, collapse = ", "))),
+  qc_row("No species is nearly one-sided (only 1 correct or 1 incorrect clip)",
+         length(val_near_one_sided) == 0,
+         paste("1 clip differs for:", paste(val_near_one_sided, collapse = ", ")), flag = "INFO")
+) %>%
+  knitr::kable(align = "llc")
+```
+
+**Reading the flags.** The file is structurally clean. The two substantive flags are about the modelling. Two clips sit at exactly 1.0 and need the same clipping as the predictions. More importantly, one species has only correct clips, and another has a single incorrect clip. A standard logistic regression has no stable solution when the outcome never varies ("perfect separation"), so those species need an explicit rule; this is a modelling decision I make in the next section.
+
+### 1.3 Cross-file checks
+
+The two files should describe the same recordings and species. These checks compare them directly.
+
+```{r qc-cross-file, echo=FALSE}
+val_recorder <- str_match(validation$filename, "^[0-9.]+_[0-9]+_([A-Za-z0-9]+)_")[, 2]
+val_start    <- str_match(validation$filename, "_([0-9]{6})\\.wav$")[, 2]
+val_on_hour  <- str_detect(val_start, "0000$")
+pred_date    <- str_match(predictions$begin_path, "_([0-9]{8})_")[, 2]
+val_date     <- str_match(validation$filename, "_([0-9]{8})_")[, 2]
+
+bind_rows(
+  qc_row("Same species in both files", setequal(predictions$common_name, validation$commonName),
+         paste(n_distinct(predictions$common_name), "in predictions,", n_distinct(validation$commonName), "in validation")),
+  qc_row("Same date range in both files",
+         min(pred_date) == min(val_date) & max(pred_date) == max(val_date),
+         paste0("predictions ", min(pred_date), " to ", max(pred_date), "; validation ", min(val_date), " to ", max(val_date))),
+  qc_row("Every validated recorder appears in the predictions",
+         all(val_recorder %in% predictions$folder), paste(n_distinct(val_recorder), "validated recorders")),
+  qc_row("Every recorder in the predictions has validation clips",
+         all(predictions$folder %in% val_recorder),
+         paste(n_distinct(setdiff(predictions$folder, val_recorder)), "of", n_distinct(predictions$folder),
+               "recorders have none"), flag = "FLAG"),
+  qc_row("Validation recordings start on the hour, like the predictions", all(val_on_hour),
+         paste(sum(!val_on_hour), "of", nrow(validation), "validation clips come from recordings starting off the hour"),
+         flag = "FLAG")
+) %>%
+  knitr::kable(align = "llc")
+```
+
+**Can the validated clips be traced back to a prediction?** Matching on recording, species and confidence (to 3 decimals):
+
+```{r qc-link, echo=FALSE}
+pred_keys <- predictions %>%
+  mutate(recording = toupper(str_remove(basename(begin_path), "\\.WAV$")), confidence = round(confidence, 3)) %>%
+  count(recording, common_name, confidence, name = "n_pred")
+
+validation %>%
+  mutate(recording = toupper(str_remove(str_remove(filename, "^[0-9.]+_[0-9]+_"), "\\.wav$")),
+         start_time = ifelse(val_on_hour, "Starts on the hour", "Starts off the hour")) %>%
+  left_join(pred_keys, by = c("recording", "commonName" = "common_name", "confidence")) %>%
+  mutate(n_pred = replace_na(n_pred, 0),
+         match = case_when(n_pred == 0 ~ "No matching prediction",
+                           n_pred == 1 ~ "One matching prediction",
+                           TRUE ~ "Several matching predictions")) %>%
+  count(start_time, match) %>%
+  pivot_wider(names_from = match, values_from = n, values_fill = 0) %>%
+  rename(`Recording start` = start_time) %>%
+  knitr::kable(align = "lrrr")
+```
+
+All of the clips from off-the-hour recordings have no match, because every file in the predictions starts on the hour. So a large part of the validation set comes from recordings that are not in the predictions file. Most of the on-the-hour clips do match, but a few match several predictions (the same score occurs more than once in a file once it is rounded to 3 decimals). This does not stop the threshold fit, which needs only `confidence` and `outcome`, but it means I cannot say the validation set is a subset of this predictions file. For now flag and follow up with question before making a decision.
+
+**Were the validated clips representative of the predictions?** Compare the score distributions:
+
+```{r qc-score-compare, echo=FALSE}
+bind_rows(
+  predictions %>% group_by(Species = common_name) %>%
+    summarise(Set = "Predictions", n = n(), `Median score` = median(confidence), `Share at 0.9 or higher` = mean(confidence >= 0.9)),
+  validation %>% group_by(Species = commonName) %>%
+    summarise(Set = "Validation", n = n(), `Median score` = median(confidence), `Share at 0.9 or higher` = mean(confidence >= 0.9))
+) %>%
+  arrange(Species, Set) %>%
+  mutate(`Median score` = round(`Median score`, 2), `Share at 0.9 or higher` = scales::percent(`Share at 0.9 or higher`, accuracy = 0.1)) %>%
+  knitr::kable(align = "llrrr")
+```
+
+For three of the four species, the validated clips have much higher scores than the predictions as a whole (the Nightjar median is about twice as high). The validation set was therefore weighted towards high scores rather than drawn at random. That is sensible for finding a high-precision threshold, since it puts more clips where false positives turn into true positives, as Wood & Kahl recommend. The consequence is that the overall 77% correct rate from the validation file is **not** the precision of the whole predictions file and should not be quoted as such. The Firefinch is the exception: its validated and predicted scores are both low, and almost no clip reaches 0.9.
+
+### 1.4 Distributions
+
+Four views of how the data are spread across scores, correctness, recorders and time. The colours are fixed: blue for the predictions, orange for the validation set. Each species gets its own panel, because BirdNET scores mean different things for different species.
+
+```{r plot-setup, include=FALSE}
+col_pred <- "#2a78d6"   # predictions
+col_val  <- "#eb6834"   # validation
+ink      <- "#52514e"
+bird_theme <- theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(colour = "#e6e5e1"),
+        strip.text = element_text(face = "bold", hjust = 0),
+        plot.title.position = "plot",
+        legend.position = "top",
+        axis.title = element_text(colour = ink),
+        axis.text = element_text(colour = ink))
+knitr::opts_chunk$set(dpi = 110)
+```
+
+#### Score histograms per species: predictions vs validation set
+
+```{r plot-score-distribution, echo=FALSE, fig.width=8, fig.height=5.5, fig.alt="Four panels, one per species, comparing the distribution of BirdNET confidence scores in the predictions and in the validation set."}
+score_bins <- seq(0.1, 1, by = 0.05)
+bind_rows(
+  predictions %>% transmute(Species = common_name, Set = "Predictions", confidence),
+  validation  %>% transmute(Species = commonName,  Set = "Validation",  confidence)
+) %>%
+  mutate(bin = cut(confidence, score_bins, include.lowest = TRUE, labels = FALSE),
+         midpoint = score_bins[bin] + 0.025) %>%
+  count(Species, Set, midpoint) %>%
+  group_by(Species, Set) %>%
+  mutate(share = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(midpoint, share, fill = Set)) +
+  geom_col(position = "identity", width = 0.045, alpha = 0.6) +
+  facet_wrap(~Species, ncol = 2) +
+  scale_fill_manual(values = c(Predictions = col_pred, Validation = col_val), name = NULL) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "BirdNET confidence", y = "Share of clips within each set") +
+  bird_theme
+```
+
+Bars show the share of each set falling in each score bin, so the two sets are comparable even though one has about 29,000 clips and the other about 550. Where the orange bars sit well above the blue bars at high scores, the validation set over-represents high-scoring clips. That is the case for the Nightjar, Oriole and Plover. For the Firefinch the two sets match, and most clips score below 0.2.
+
+#### Share of validated clips that were correct, by score band and species
+
+```{r plot-share-correct, echo=FALSE, fig.width=8, fig.height=5.5, fig.alt="Four panels, one per species, showing the share of validated clips that were correct within bands of BirdNET confidence, with a dashed reference line at 99 percent."}
+correct_bins <- seq(0.1, 1, by = 0.1)
+validation %>%
+  mutate(bin = cut(confidence, correct_bins, include.lowest = TRUE, labels = FALSE),
+         midpoint = correct_bins[bin] + 0.05) %>%
+  group_by(commonName, midpoint) %>%
+  summarise(n = n(), share_correct = mean(outcome), .groups = "drop") %>%
+  ggplot(aes(midpoint, share_correct)) +
+  geom_hline(yintercept = 0.99, linetype = "dashed", colour = ink) +
+  geom_point(aes(size = n), colour = col_val) +
+  facet_wrap(~commonName, ncol = 2) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_size_area(max_size = 5, name = "Clips in bin") +
+  labs(x = "BirdNET confidence (bin midpoint)", y = "Share correct") +
+  bird_theme
+```
+
+This is a model-free preview of what the logistic regression will estimate: the share of validated clips that were correct, in bands of score. The dashed line marks the 99% target, and the point size shows how many clips each point rests on. Bands with only a few clips can jump around, so read the large points first.
+
+- **Nightjar:** the share correct climbs from about a third at the lowest scores to 100% from about 0.4 upwards, which is the shape the method expects.
+- **Oriole:** every band is 100% correct, including the lowest scores. Nothing in the data shows where correctness starts to fail.
+- **Plover:** the same, apart from a single incorrect clip in the 0.2 to 0.3 band.
+- **Firefinch:** almost every clip below 0.6 was wrong, and there is one clip above that, which was correct. One clip cannot support a threshold.
+
+The Oriole and Plover panels are why the standard fit breaks down: even the lowest-scoring clips were correct, so the data cannot show where correctness starts to fail, and a threshold may sit at or below the lowest score BirdNET reports (0.1). How to handle that is the main modelling decision for the next section.
+
+#### Predictions per recorder, from busiest to quietest
+
+```{r plot-recorders, echo=FALSE, fig.width=6.5, fig.height=8, fig.alt="Horizontal bar chart of the number of predictions for each of the 43 recorders, sorted from most to fewest."}
+recorder_counts <- predictions %>% count(folder) %>% arrange(n)
+top5_share <- sum(tail(recorder_counts$n, 5)) / nrow(predictions)
+top_recorder <- recorder_counts %>% slice_tail(n = 1)
+
+ggplot(recorder_counts, aes(n, fct_inorder(folder))) +
+  geom_col(fill = col_pred, width = 0.7) +
+  labs(x = "Predictions", y = NULL) +
+  bird_theme +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.major.x = element_line(colour = "#e6e5e1"))
+```
+
+The predictions are concentrated in a few recorders. The five busiest account for `r scales::percent(top5_share, accuracy = 1)` of all predictions, and the busiest, `r top_recorder$folder`, alone has `r format(top_recorder$n, big.mark = ",")`. Many recorders contribute only a handful. Predictions from the same recorder, and from neighbouring segments of a continuous call, are not independent of each other, so the effective sample size is smaller than the row count suggests. Thresholds fitted on the validation clips are applied to all of these recorders, and 11 of them have no validation clips (see 1.3).
+
+#### Predictions per day and by hour of day (hour of day shown per species)
+
+```{r plot-time, echo=FALSE, fig.width=8, fig.height=3, fig.alt="Bar chart of predictions per day over the 23 recording days."}
+predictions_time <- predictions %>%
+  mutate(date = ymd(str_match(begin_path, "_([0-9]{8})_")[, 2]),
+         hour = as.integer(str_match(begin_path, "_[0-9]{8}_([0-9]{2})")[, 2]))
+
+predictions_time %>%
+  count(date) %>%
+  ggplot(aes(date, n)) +
+  geom_col(fill = col_pred, width = 0.8) +
+  labs(x = NULL, y = "Predictions") +
+  bird_theme
+```
+
+```{r plot-hour, echo=FALSE, fig.width=8, fig.height=5, fig.alt="Four panels, one per species, showing predictions by hour of day at which the recording started."}
+predictions_time %>%
+  count(common_name, hour) %>%
+  ggplot(aes(hour, n)) +
+  geom_col(fill = col_pred, width = 0.8) +
+  facet_wrap(~common_name, ncol = 2, scales = "free_y") +
+  scale_x_continuous(breaks = seq(0, 23, 6)) +
+  labs(x = "Hour of day (recording start)", y = "Predictions") +
+  bird_theme
+```
+
+Predictions are available for every day from 20 June to 12 July 2023 but the daily counts vary a lot. They reflect how much was recorded as well as how much the birds called, and I don't have the recording effort per day, so I would not read the day-to-day pattern as bird activity. By hour of day, the patterns differ by species: the Nightjar is concentrated in the evening and the early morning hours, and the Oriole peaks in the morning. Each panel has its own vertical scale, since the species have very different numbers of predictions. Time of day is not part of the planned fit, so any effect of it on scores would be absorbed into a single curve per species rather than modelled.
