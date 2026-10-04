@@ -27,6 +27,12 @@ validation  <- read_csv(file.path(bird_dir, "validation_results.csv"))
     1. [Approach](#21-approach)
     2. [Reference case: Abyssinian Nightjar](#22-reference-case-abyssinian-nightjar)
     3. [Oriole and Plover: when the standard fit breaks](#23-oriole-and-plover-when-the-standard-fit-breaks)
+    4. [Firefinch: no threshold exists](#24-firefinch-no-threshold-exists)
+    5. [The paper's formula compared with the three-part rule](#25-the-papers-formula-compared-with-the-three-part-rule)
+3. [Labelling the predictions](#3-labelling-the-predictions)
+    1. [Thresholds and the `observation` field](#31-thresholds-and-the-observation-field)
+    2. [Checks on the labels](#32-checks-on-the-labels)
+    3. [Decision: operate at the point estimates](#33-decision-operate-at-the-point-estimates)
 
 ## 1. Data exploration and summaries
 
@@ -594,6 +600,8 @@ The Oriole and Plover were almost never wrong in the validation set: 150 of 150 
 2. Otherwise, if the fitted line never reaches 99% within the validated range (or the slope is not positive), there is **no threshold**, and no predictions for that species can be called observations.
 3. Otherwise, the threshold is the score where the fitted line crosses 99%, using the paper's formula.
 
+**This rule is my own design.** It is not part of the assignment or of the Wood & Kahl paper. The paper supplies the formula in step 3. Steps 1 and 2 cover the cases where that formula cannot be applied safely. Section 2.5 compares the rule with applying the formula literally.
+
 ```{r op-fits}
 op_species <- c("African Black-headed Oriole", "Three-banded Plover")
 op_data <- map(set_names(op_species), function(sp) {
@@ -607,11 +615,14 @@ apply_rule <- function(b0, b1, d) {
   p_lowest <- plogis(b0 + b1 * lowest)
   p_highest <- plogis(b0 + b1 * highest)
   if (p_lowest >= p_target) {
-    tibble(p_lowest = p_lowest, outcome = "Met at the lowest validated score", threshold = from_logit(lowest))
+    tibble(p_lowest = p_lowest, p_highest = p_highest,
+           outcome = "Met at the lowest validated score", threshold = from_logit(lowest))
   } else if (b1 <= 0 || p_highest < p_target) {
-    tibble(p_lowest = p_lowest, outcome = "Not reached within the validated range", threshold = NA_real_)
+    tibble(p_lowest = p_lowest, p_highest = p_highest,
+           outcome = "Not reached within the validated range", threshold = NA_real_)
   } else {
-    tibble(p_lowest = p_lowest, outcome = "Reached within the validated range",
+    tibble(p_lowest = p_lowest, p_highest = p_highest,
+           outcome = "Reached within the validated range",
            threshold = from_logit((target_logit - b0) / b1))
   }
 }
@@ -757,3 +768,274 @@ n_obs_plover  <- sum(predictions$common_name == "Three-banded Plover" & predicti
 
 - **Oriole:** the data are consistent with at least 99% of Oriole predictions being correct at every score, so the rule gives the lowest validated score, `r round(oriole_floor, 3)`, as the threshold. In practice that means every Oriole prediction is labelled an observation (all `r format(n_pred_oriole, big.mark = ",")` of them). The rule strictly covers all but `r n_below_floor` predictions that score between 0.100 and `r round(oriole_floor, 3)`, just below the lowest score anyone checked. I include those too, because the fitted probability is flat across the whole validated range and the gap is only about 0.004, and I flag it as a small extrapolation. I will record this as **weakly supported**: the sample cannot rule out a precision of about 98%.
 - **Plover:** the primary threshold is the Firth estimate, `r round(plover_firth, 2)`, which would label `r format(n_obs_plover, big.mark = ",")` of the `r format(n_pred_plover, big.mark = ",")` Plover predictions as observations. I choose Firth over the plain fit because it is the more cautious of the two and does not hinge on one clip. I will record this as **weakly identified**, with the range above and the plain-fit alternative of about 0.26 for comparison.
+
+### 2.4 Firefinch: no threshold exists
+
+The Firefinch is the opposite case to the Oriole and Plover. It was almost always wrong in the validation set (6 of 101 clips correct), so the question is whether *any* score reaches 99%. The same rule applies: fit the line, and see whether it reaches 99% within the range of scores that were actually validated.
+
+```{r ff-fits}
+ff_data <- validation %>%
+  filter(commonName == "Red-billed Firefinch") %>%
+  mutate(logit_score = to_logit(confidence))
+
+ff_fits <- fit_both(ff_data)
+plain_interval <- confint.default(ff_fits$plain)[2, ]
+firth_interval <- c(ff_fits$firth$ci.lower[2], ff_fits$firth$ci.upper[2])
+
+bind_rows(
+  tibble(Method = "Plain logistic regression", Slope = coef(ff_fits$plain)[2],
+         `Slope 95% interval` = sprintf("%.2f to %.2f", plain_interval[1], plain_interval[2])) %>%
+    bind_cols(apply_rule(coef(ff_fits$plain)[1], coef(ff_fits$plain)[2], ff_data)),
+  tibble(Method = "Firth", Slope = coef(ff_fits$firth)[2],
+         `Slope 95% interval` = sprintf("%.2f to %.2f", firth_interval[1], firth_interval[2])) %>%
+    bind_cols(apply_rule(coef(ff_fits$firth)[1], coef(ff_fits$firth)[2], ff_data))
+) %>%
+  transmute(Method,
+            Slope = round(Slope, 2),
+            `Slope 95% interval`,
+            `Probability correct at the highest validated score` = scales::percent(p_highest, accuracy = 1),
+            Outcome = outcome) %>%
+  knitr::kable(align = "lrrrl")
+```
+
+Unlike the Oriole and Plover, the fit here is well behaved: the slope is clearly positive, so a higher score does mean a higher chance of being right. But the line is nowhere near 99% at the top of the validated range. At the highest score anyone checked, the fitted probability of being correct is only about two-thirds, under both methods. The paper's formula would extrapolate to a threshold far beyond any score that has been validated, which is not something the data can support, so the rule returns **no threshold**.
+
+```{r ff-bootstrap}
+set.seed(2026)
+ff_boot <- map_dfr(seq_len(500), function(i) {
+  resample <- ff_data[sample(nrow(ff_data), replace = TRUE), ]
+  f <- logistf::logistf(outcome ~ logit_score, data = resample)
+  apply_rule(coef(f)[1], coef(f)[2], ff_data)
+})
+ff_share_none <- mean(ff_boot$outcome == "Not reached within the validated range")
+
+ff_pred <- predictions %>% filter(common_name == "Red-billed Firefinch")
+ff_correct_low <- ff_data %>% filter(outcome == 1, confidence < 0.2)
+ff_expected_correct <- sum(plogis(coef(ff_fits$firth)[1] + coef(ff_fits$firth)[2] * to_logit(ff_pred$confidence)))
+```
+
+**How stable is this?** In `r scales::percent(ff_share_none, accuracy = 1)` of 500 resamples, the Firth fit also finds that 99% is not reached within the validated range. So the conclusion does not depend on a few unusual clips.
+
+**Why the data are so thin at the top.** There are only `r nrow(ff_pred)` Firefinch predictions in the whole file, and they score low. Only `r sum(ff_pred$confidence >= 0.9)` scores 0.9 or higher, only `r sum(ff_pred$confidence >= 0.5)` score 0.5 or higher, and the highest score is `r round(max(ff_pred$confidence), 3)`. Of the 6 correct validated clips, `r nrow(ff_correct_low)` score between `r min(ff_correct_low$confidence)` and `r max(ff_correct_low$confidence)`, a very narrow band at the low end, and only one scores above 0.3. That is a thin base for the upper end of the curve.
+
+**What I take from this.**
+
+- **No Firefinch prediction is classed as an observation.** The highest-scoring Firefinch prediction in the file is estimated to be right about two times in three, which is well short of 99%. Using the fitted model across all `r nrow(ff_pred)` Firefinch predictions, I would expect only about `r round(ff_expected_correct)` of them to be correct.
+- **This is a finding, not a failure of the method.** BirdNET's Firefinch predictions in this dataset cannot be trusted without a human check. The practical consequence is small, because only `r sum(ff_pred$confidence >= 0.5)` predictions score 0.5 or higher, so a person could review all of them directly. That is a recommendation I will pass to the Tech team.
+
+### 2.5 The paper's formula compared with the three-part rule
+
+The three-part rule in 2.3 is my own. To show what it changes, this table applies the paper's formula **literally** to each species' main fitted line (the logistic regression for the Nightjar, Firth for the others) and compares the result with the rule. The formula is `(ln(0.99 / 0.01) - intercept) / slope`, converted back to a 0 to 1 confidence score.
+
+```{r formula-vs-rule, echo=FALSE}
+literal_threshold <- function(b) from_logit((target_logit - b[1]) / b[2])
+
+formula_vs_rule <- tibble(
+  Species = c("Abyssinian Nightjar", "African Black-headed Oriole", "Three-banded Plover", "Red-billed Firefinch"),
+  b = list(coef(fit),
+           coef(op_fits[["African Black-headed Oriole"]]$firth),
+           coef(op_fits[["Three-banded Plover"]]$firth),
+           coef(ff_fits$firth)),
+  rule_threshold = c(threshold, min(predictions$confidence[predictions$common_name == "African Black-headed Oriole"]),
+                     plover_firth, NA_real_)
+) %>%
+  mutate(slope = map_dbl(b, 2),
+         formula_threshold = map_dbl(b, literal_threshold),
+         formula_labelled = map2_int(Species, formula_threshold,
+                                     ~ sum(predictions$common_name == .x & predictions$confidence >= .y)),
+         rule_labelled = map2_int(Species, rule_threshold,
+                                  ~ if (is.na(.y)) 0L else sum(predictions$common_name == .x & predictions$confidence >= .y)))
+
+formula_vs_rule %>%
+  transmute(Species,
+            Slope = round(slope, 2),
+            `Formula applied literally` = format(round(formula_threshold, 4), nsmall = 4),
+            `Predictions labelled (formula)` = format(formula_labelled, big.mark = ","),
+            `Three-part rule` = ifelse(is.na(rule_threshold), "none", format(round(rule_threshold, 4), nsmall = 3)),
+            `Predictions labelled (rule)` = format(rule_labelled, big.mark = ",")) %>%
+  knitr::kable(align = "lrrrrr")
+```
+
+**Where they agree.** For the Nightjar and the Plover the two give the same threshold, because the formula is well defined there and the rule simply applies it. For the Firefinch the formula's answer is a score so high (about 0.999) that no Firefinch prediction reaches it, which is the same practical result as the rule's "no threshold".
+
+**Where they differ: the Oriole.** The fitted Oriole slope is slightly negative, so the formula divides by a number that carries no information and returns a threshold of about 0.9997. Taken literally, that labels no Oriole predictions at all, even though all 150 Orioles that were checked were correct, including the lowest-scoring ones. My rule instead labels every Oriole prediction. Neither answer is a clean reading of the data, which is why I flag it below.
+
+**The uncertainty for the Oriole.** There are three defensible positions, and the data cannot fully separate them:
+
+1. **Label every Oriole prediction as an observation** (what I did). The evidence leans this way: every checked Oriole prediction was correct, at every score, and the fitted probability sits above 99% across the whole checked range.
+2. **Label none.** This is what a literal reading of the formula gives, but it comes from dividing by a meaningless slope, so I do not think it should be taken at face value.
+3. **Hold the Orioles as "unverified" until more of them are checked.** This is the most cautious position. It is supported by the sample size: even a perfect record on 150 clips is consistent with a true precision of about 98%, so the data cannot demonstrate 99%. Because the Orioles are 85% of the labelled predictions, this choice moves the overall result more than any other in the analysis.
+
+I chose the first position because it follows the evidence and the assignment's 99% standard as closely as the data allow, and I record the Oriole result as **weakly supported**. Which position to adopt is a question for the Natural State science team, and it is listed among the open questions for them.
+
+## 3. Labeling the predictions
+
+### 3.1 Thresholds and the `observation` field
+
+This is Task 1. Each species has a threshold from section 2, and every prediction at or above its species' threshold is labelled as an observation of that species. The `observation` field holds the species name for observations and is empty for predictions that stay unverified.
+
+```{r labelling}
+oriole_name <- "African Black-headed Oriole"
+nightjar_threshold <- threshold   # from section 2.2
+
+thresholds <- tibble(
+  species = c("Abyssinian Nightjar", oriole_name, "Three-banded Plover", "Red-billed Firefinch"),
+  threshold = c(nightjar_threshold,
+                # the rule gave the lowest validated score; all predictions qualify
+                min(predictions$confidence[predictions$common_name == oriole_name]),
+                plover_firth,
+                NA_real_),
+  basis = c("Logistic regression, point where the fitted probability reaches 99%",
+            "Firth; 99% already met at the lowest validated score, so every prediction qualifies",
+            "Firth, point where the fitted probability reaches 99%",
+            "99% not reached within the validated range, so no threshold"),
+  support = c("Solid", "Weak", "Weakly identified", "No threshold")
+)
+
+predictions_labelled <- predictions %>%
+  left_join(select(thresholds, common_name = species, threshold), by = "common_name") %>%
+  mutate(observation = if_else(!is.na(threshold) & confidence >= threshold, common_name, NA_character_)) %>%
+  select(-threshold)
+
+# Written next to the input data, outside the repository
+write_csv(predictions_labelled, file.path(bird_dir, "birdnet_predictions_labelled.csv"), na = "")
+
+predictions_labelled %>%
+  group_by(species = common_name) %>%
+  summarise(Predictions = n(), Observations = sum(!is.na(observation)), .groups = "drop") %>%
+  left_join(thresholds, by = "species") %>%
+  mutate(`Share labelled` = scales::percent(Observations / Predictions, accuracy = 1),
+         Threshold = ifelse(is.na(threshold), "none", format(round(threshold, 3), nsmall = 3)),
+         Predictions = format(Predictions, big.mark = ","),
+         Observations = format(Observations, big.mark = ",")) %>%
+  select(Species = species, Threshold, Predictions, Observations, `Share labelled`, Support = support) %>%
+  knitr::kable(align = "lrrrrl")
+```
+
+Two things to keep in mind when reading this table.
+
+**1. The Oriole threshold is 0.100, not 0.104.** The three-part rule in section 2.3 says that when the fitted curve is already at 99% or above at the lowest score a human actually checked, the threshold is that lowest checked score. For the Oriole, the lowest score in `validation_results.csv` is `r round(oriole_floor, 3)`. But `birdnet_predictions.csv` contains `r n_below_floor` Oriole predictions that score between 0.100 (the lowest score BirdNET saved) and `r round(oriole_floor, 3)`, below anything that was checked. Applying the rule strictly would leave those unlabelled. I label them too, because the fitted curve is flat across the whole checked range and the gap is only about 0.004, so the threshold in this table is set to 0.100. This is a small extrapolation beyond the validated scores.
+
+**2. Most of the observations are Orioles.** Here, an "observation" means a prediction in `birdnet_predictions.csv` that now has a value in the new `observation` field. The number of observations therefore depends heavily on the species whose threshold is least well supported:
+
+```{r observation-share, echo=FALSE}
+obs_by_species <- predictions_labelled %>%
+  filter(!is.na(observation)) %>%
+  count(observation)
+oriole_share_of_obs <- obs_by_species$n[obs_by_species$observation == oriole_name] / sum(obs_by_species$n)
+```
+
+Of the `r format(sum(obs_by_species$n), big.mark = ",")` predictions labelled as observations (out of `r format(nrow(predictions_labelled), big.mark = ",")` predictions in total), `r scales::percent(oriole_share_of_obs, accuracy = 1)` are Orioles. Every Oriole prediction is labelled, while most Nightjar and Plover predictions are not.
+
+The labelled file has the same rows and columns as the input plus the new `observation` column. It is written to the data folder and not committed to the repository, for the same reason the input data are not.
+
+`confidence` is compared with the threshold on the original 0 to 1 scale, so the clipping of scores of exactly 1.0 (used only to fit the models) does not affect any label.
+
+### 3.2 Checks on the labels
+
+**Do the labels follow the rule?**
+
+```{r label-checks, echo=FALSE}
+labelled_with_threshold <- predictions_labelled %>%
+  left_join(select(thresholds, common_name = species, threshold), by = "common_name")
+
+n_should_label <- sum(!is.na(labelled_with_threshold$threshold) &
+                        labelled_with_threshold$confidence >= labelled_with_threshold$threshold)
+
+bind_rows(
+  qc_row("Same rows as the input, key still unique",
+         nrow(predictions_labelled) == nrow(predictions) &
+           n_distinct(predictions_labelled$begin_path, predictions_labelled$begin_time_s,
+                      predictions_labelled$common_name) == nrow(predictions),
+         paste(format(nrow(predictions_labelled), big.mark = ","), "rows")),
+  qc_row("Every observation scores at or above its species' threshold",
+         all(labelled_with_threshold$confidence[!is.na(labelled_with_threshold$observation)] >=
+               labelled_with_threshold$threshold[!is.na(labelled_with_threshold$observation)]),
+         paste(sum(!is.na(predictions_labelled$observation)), "observations checked")),
+  qc_row("Every prediction at or above its threshold is labelled",
+         n_should_label == sum(!is.na(predictions_labelled$observation)),
+         paste(n_should_label, "expected,", sum(!is.na(predictions_labelled$observation)), "labelled")),
+  qc_row("Each observation names its own species",
+         all(predictions_labelled$observation[!is.na(predictions_labelled$observation)] ==
+               predictions_labelled$common_name[!is.na(predictions_labelled$observation)]),
+         "all rows match"),
+  qc_row("No Firefinch is labelled (no threshold)",
+         !any(!is.na(predictions_labelled$observation) & predictions_labelled$common_name == "Red-billed Firefinch"),
+         "0 Firefinch observations")
+) %>%
+  knitr::kable(align = "llc")
+```
+
+**Do the labels hold up against the validated clips?** Applying the thresholds to the validation set shows how many of the clips that would be called observations were actually correct. These are clips the model was fitted on, so this is a consistency check rather than independent proof.
+
+```{r label-validation-check, echo=FALSE}
+validation %>%
+  left_join(select(thresholds, commonName = species, threshold), by = "commonName") %>%
+  group_by(Species = commonName) %>%
+  summarise(`Validated clips` = n(),
+            `Would be observations` = sum(!is.na(threshold) & confidence >= threshold),
+            Correct = sum(outcome[!is.na(threshold) & confidence >= threshold]),
+            .groups = "drop") %>%
+  mutate(`Share correct` = ifelse(`Would be observations` == 0, "n/a",
+                                  scales::percent(Correct / `Would be observations`, accuracy = 0.1))) %>%
+  knitr::kable(align = "lrrrr")
+```
+
+**How many wrong labels should we expect?** The paper asks that estimated error rates be disclosed when predictions cannot all be checked. Using each species' fitted probabilities, the expected number of incorrect observations is the sum of `1 - probability correct` over the labelled predictions:
+
+```{r expected-errors, echo=FALSE}
+prob_correct <- function(species, conf) {
+  l <- to_logit(conf)
+  if (species == "Abyssinian Nightjar") {
+    b <- coef(fit)
+  } else if (species == oriole_name) {
+    b <- coef(op_fits[[oriole_name]]$firth)
+  } else {
+    b <- coef(op_fits[["Three-banded Plover"]]$firth)
+  }
+  plogis(b[1] + b[2] * l)
+}
+
+predictions_labelled %>%
+  filter(!is.na(observation)) %>%
+  group_by(Species = common_name) %>%
+  summarise(Observations = n(),
+            `Expected incorrect` = sum(1 - prob_correct(first(common_name), confidence)),
+            .groups = "drop") %>%
+  mutate(`Expected share correct` = scales::percent(1 - `Expected incorrect` / Observations, accuracy = 0.1),
+         `Expected incorrect` = round(`Expected incorrect`)) %>%
+  knitr::kable(align = "lrrr")
+```
+
+These are model-based estimates. They rest on the fitted curves, including the weakly identified ones for the Oriole and Plover, so they are estimates of the order of magnitude and should not be read as exact.
+
+### 3.3 Decision: operate at the point estimates
+
+The thresholds used above are the **point estimates** from the fitted models, not the cautious end of their intervals. I made this choice for three reasons:
+
+1. It is what the assignment asks for: a threshold at a 99% probability of being correct. Moving to the upper end of an interval would silently change the standard.
+2. The pipeline needs one number per species. The uncertainty is reported next to each threshold and the weakly supported species are flagged, so a reader can see how much weight each one can bear.
+3. The threshold is a single parameter per species. If Natural State prefers fewer false positives at the cost of fewer observations, it can be moved to the cautious end without changing anything else, and the specification will treat it as a setting and not a constant.
+
+To show what the alternative would cost, this table compares the point estimate with the cautious end of the interval, for the two species where a threshold is estimated from the data (the Oriole has no threshold to move and the Firefinch has none at all):
+
+```{r cautious-sensitivity, echo=FALSE}
+cautious <- tibble(
+  Species = c("Abyssinian Nightjar", "Three-banded Plover"),
+  `Point estimate` = c(nightjar_threshold, plover_firth),
+  `Cautious end of the interval` = c(unname(boot_ci[2]), unname(plover_interval[3]))
+) %>%
+  mutate(`Observations at point estimate` = map2_int(Species, `Point estimate`,
+           ~ sum(predictions$common_name == .x & predictions$confidence >= .y)),
+         `Observations at cautious end` = map2_int(Species, `Cautious end of the interval`,
+           ~ sum(predictions$common_name == .x & predictions$confidence >= .y)))
+
+n_drop_nightjar <- cautious[[4]][1] - cautious[[5]][1]
+n_drop_plover   <- cautious[[4]][2] - cautious[[5]][2]
+
+cautious %>%
+  mutate(across(c(`Point estimate`, `Cautious end of the interval`), ~ round(.x, 3))) %>%
+  knitr::kable(align = "lrrrr")
+```
+
+Moving to the cautious end would remove `r format(n_drop_nightjar, big.mark = ",")` Nightjar observations and `r n_drop_plover` Plover observations. For the Plover the cautious end is the upper limit of the Firth threshold among resamples in which a threshold exists (section 2.3).
