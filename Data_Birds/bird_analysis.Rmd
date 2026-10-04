@@ -23,6 +23,10 @@ validation  <- read_csv(file.path(bird_dir, "validation_results.csv"))
     2. [Data schema: `validation_results.csv`](#12-data-schema-validation_resultscsv)
     3. [Cross-file checks](#13-cross-file-checks)
     4. [Distributions](#14-distributions)
+2. [Modelling: from confidence scores to species thresholds](#2-modelling-from-confidence-scores-to-species-thresholds)
+    1. [Approach](#21-approach)
+    2. [Reference case: Abyssinian Nightjar](#22-reference-case-abyssinian-nightjar)
+    3. [Oriole and Plover: when the standard fit breaks](#23-oriole-and-plover-when-the-standard-fit-breaks)
 
 ## 1. Data exploration and summaries
 
@@ -416,3 +420,340 @@ predictions_time %>%
 ```
 
 Predictions are available for every day from 20 June to 12 July 2023 but the daily counts vary a lot. They reflect how much was recorded as well as how much the birds called, and I don't have the recording effort per day, so I would not read the day-to-day pattern as bird activity. By hour of day, the patterns differ by species: the Nightjar is concentrated in the evening and the early morning hours, and the Oriole peaks in the morning. Each panel has its own vertical scale, since the species have very different numbers of predictions. Time of day is not part of the planned fit, so any effect of it on scores would be absorbed into a single curve per species rather than modelled.
+
+## 2. Modelling: from confidence scores to species thresholds
+
+### 2.1 Approach
+
+BirdNET's confidence score is not a probability, and it means something different for each species (Wood & Kahl 2024). To decide which predictions to treat as observations, I follow the method in that paper for each species separately:
+
+1. Convert each confidence score `c` to the logit scale, `ln(c / (1 - c))`.
+2. Fit a logistic regression of the ornithologist's verdict (`outcome`) on the logit score. This turns a score into an estimated probability that the prediction is correct.
+3. Solve the fitted model for the score at which that probability reaches 0.99, the target set in the assignment. That score is the species' threshold.
+4. Label every prediction at or above its species' threshold as an observation of that species.
+
+Two choices apply to every species. Both are decisions rather than facts about the data:
+
+- **Clipping.** A score of exactly 1.0 has an infinite logit, so scores are clipped to the range 0.0001 to 0.9999. The data never show a value between 0.9999 and 1, so this is the closest finite value. Section 2.2 checks that the choice does not matter for the Nightjar.
+- **Sensitivity.** BirdNET's logit is defined as `ln(c / (1 - c))` divided by a sensitivity setting. The data do not record that setting, so I assume the BirdNET default of 1. A different value would rescale the logit axis but would not change which predictions fall above the threshold, because the transform is the same monotonic stretch for every score.
+
+I start with the Nightjar as a reference case, because its validation data contain both correct and incorrect clips across the score range, so the standard method should work as written. The other three species need special handling and come after.
+
+### 2.2 Reference case: Abyssinian Nightjar
+
+```{r nightjar-setup}
+clip_eps <- 1e-4
+p_target <- 0.99
+
+to_logit   <- function(c, eps = clip_eps) { c <- pmin(pmax(c, eps), 1 - eps); log(c / (1 - c)) }
+from_logit <- function(l) 1 / (1 + exp(-l))
+target_logit <- qlogis(p_target)   # logit of 0.99
+
+nightjar <- validation %>%
+  filter(commonName == "Abyssinian Nightjar") %>%
+  mutate(logit_score = to_logit(confidence))
+
+fit <- glm(outcome ~ logit_score, family = binomial, data = nightjar)
+
+summary(fit)$coefficients %>%
+  as_tibble(rownames = "Term") %>%
+  mutate(across(c(Estimate, `Std. Error`, `z value`), ~ round(.x, 3)),
+         `p value` = ifelse(`Pr(>|z|)` < 0.001, "<0.001", as.character(round(`Pr(>|z|)`, 3))),
+         `Pr(>|z|)` = NULL) %>%
+  knitr::kable(align = "lrrrr")
+```
+
+The slope is positive and clearly different from zero, so a higher score does mean a higher chance of being correct, as the method assumes. Solving the fitted model for a 99% chance of being correct gives the threshold:
+
+```{r nightjar-threshold}
+b <- coef(fit)
+threshold_logit <- unname((target_logit - b[1]) / b[2])
+threshold <- from_logit(threshold_logit)
+```
+
+The point estimate is **`r round(threshold, 3)`**: Nightjar predictions scoring at least this are classed as observations. A single number hides how uncertain it is with 150 clips, so I estimate an interval two ways. The delta method uses the model's own standard errors. The bootstrap refits the model on 2,000 resamples of the 150 clips.
+
+```{r nightjar-uncertainty}
+# Delta method, on the logit scale
+g <- c(-1 / b[2], -(target_logit - b[1]) / b[2]^2)
+se_logit <- sqrt(drop(t(g) %*% vcov(fit) %*% g))
+delta_ci <- from_logit(threshold_logit + c(-1, 1) * 1.96 * se_logit)
+
+# Bootstrap: refit on resampled clips, keeping track of any resample where
+# the fit hits (near-)perfect separation and R warns about it
+fit_threshold <- function(d) {
+  warned <- FALSE
+  f <- withCallingHandlers(
+    glm(outcome ~ logit_score, family = binomial, data = d),
+    warning = function(w) { warned <<- TRUE; invokeRestart("muffleWarning") })
+  tibble(threshold_logit = unname((target_logit - coef(f)[1]) / coef(f)[2]), warned = warned)
+}
+
+set.seed(2026)
+boot <- map_dfr(seq_len(2000), ~ fit_threshold(nightjar[sample(nrow(nightjar), replace = TRUE), ]))
+boot_ci <- from_logit(quantile(boot$threshold_logit, c(0.025, 0.975)))
+
+options(knitr.kable.NA = "")   # show blank cells instead of "NA"
+
+tibble(
+  Method = c("Point estimate", "Delta method, 95% interval", "Bootstrap, 95% interval"),
+  Lower = c(NA, delta_ci[1], boot_ci[1]),
+  Estimate = c(threshold, NA, NA),
+  Upper = c(NA, delta_ci[2], boot_ci[2])
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable()
+```
+
+The two intervals agree reasonably well: the threshold is probably between about `r round(boot_ci[1], 2)` and `r round(boot_ci[2], 2)`. That is a wide range, which is expected with 150 clips and only 33 incorrect ones. In `r sum(boot$warned)` of the 2,000 bootstrap resamples (`r scales::percent(mean(boot$warned), accuracy = 1)`), the resampled data came close to perfect separation, so the model warned that some fitted probabilities were effectively 0 or 1. I kept those resamples in. Dropping them would leave the interval too narrow and shifted upwards, because those resamples produce lower thresholds. They are a small preview of the problem that the Oriole and Plover will have in full.
+
+```{r nightjar-plot, fig.width=8, fig.height=5, fig.alt="Fitted probability that a Nightjar prediction is correct against BirdNET confidence on a logit scale, with the validated clips grouped into score bands, a dashed line at 99 percent and a shaded band for the threshold's bootstrap interval."}
+curve <- tibble(logit_score = seq(to_logit(0.1), to_logit(0.9999), length.out = 200))
+curve$glm <- predict(fit, curve, type = "response")
+
+gam_fit <- mgcv::gam(outcome ~ s(logit_score), family = binomial, data = nightjar)
+curve$gam <- predict(gam_fit, curve, type = "response")
+
+bands <- nightjar %>%
+  mutate(band = cut(confidence, seq(0.1, 1, by = 0.1), include.lowest = TRUE)) %>%
+  group_by(band) %>%
+  summarise(n = n(), share_correct = mean(outcome), logit_score = mean(logit_score), .groups = "drop")
+
+conf_ticks <- c(0.1, 0.3, 0.5, 0.7, 0.9, 0.99)
+
+ggplot() +
+  annotate("rect", xmin = quantile(boot$threshold_logit, 0.025), xmax = quantile(boot$threshold_logit, 0.975),
+           ymin = 0, ymax = 1, fill = ink, alpha = 0.12) +
+  geom_hline(yintercept = p_target, linetype = "dashed", colour = ink) +
+  geom_vline(xintercept = threshold_logit, colour = ink) +
+  geom_line(data = curve, aes(logit_score, gam), colour = ink, linetype = "dotted") +
+  geom_line(data = curve, aes(logit_score, glm), colour = "#0b0b0b", linewidth = 0.9) +
+  geom_point(data = bands, aes(logit_score, share_correct, size = n), colour = col_val) +
+  scale_x_continuous(breaks = to_logit(conf_ticks), labels = conf_ticks) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_size_area(max_size = 6, name = "Clips in band") +
+  labs(x = "BirdNET confidence (axis spaced on the logit scale)",
+       y = "Probability the prediction is correct") +
+  bird_theme
+```
+
+The solid line is the fitted logistic curve. The orange points are the validated clips grouped into score bands, with larger points resting on more clips. The dashed horizontal line is the 99% target, the vertical line is the threshold, and the shaded band is its bootstrap interval. The dotted line is a flexible alternative curve, used in the check below.
+
+**Does a straight line on the logit scale fit?** The method assumes so. I compared the logistic regression with a flexible smooth (a generalised additive model) on the same data:
+
+```{r nightjar-linearity}
+tibble(
+  Model = c("Logistic regression (straight line on logit scale)", "Flexible smooth (GAM)"),
+  AIC = c(AIC(fit), AIC(gam_fit)),
+  `Effective parameters` = c(2, sum(gam_fit$edf)),
+  `Score where 99% is reached` = c(threshold, from_logit(curve$logit_score[which(curve$gam >= p_target)[1]]))
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3))) %>%
+  knitr::kable()
+```
+
+The flexible model settles on an almost straight line (about 2 effective parameters, the same as the logistic regression), has the same AIC, and reaches 99% at nearly the same score. So the data give no reason to prefer anything other than the straight-line model.
+
+**Does the clipping choice matter?** Two Nightjar clips score exactly 1.0 and are affected by clipping. Re-fitting with different clip values:
+
+```{r nightjar-clip-check}
+map_dfr(c(1e-3, 1e-4, 1e-5), function(eps) {
+  d <- nightjar %>% mutate(logit_score = to_logit(confidence, eps))
+  f <- glm(outcome ~ logit_score, family = binomial, data = d)
+  tibble(`Clipped to` = paste0(eps, " to ", 1 - eps),
+         Threshold = from_logit((target_logit - coef(f)[1]) / coef(f)[2]))
+}) %>%
+  mutate(Threshold = round(Threshold, 3)) %>%
+  knitr::kable()
+```
+
+The threshold does not change, so the clipping choice has no effect for this species.
+
+**What the fit says about the Nightjar.** Two things are worth recording.
+
+```{r nightjar-observations}
+high_scoring <- nightjar %>% filter(confidence >= 0.4)
+n_pred_nightjar <- sum(predictions$common_name == "Abyssinian Nightjar")
+n_obs_nightjar  <- sum(predictions$common_name == "Abyssinian Nightjar" & predictions$confidence >= threshold)
+```
+
+- **The model is more cautious than the raw score bands.** All `r nrow(high_scoring)` validated Nightjar clips scoring 0.4 or more were correct, yet the fitted curve only reaches 99% at about `r round(threshold, 2)`. A likely reason is that the logistic curve has to describe the many low-scoring clips, where only about a third were correct, and the same smooth S-shape then reaches 99% later than the raw bands do. A single curve cannot match every part of the data exactly, and here it errs on the cautious side. With only 150 clips, "all correct" above 0.4 is also not enough on its own to show 99% precision, which is why I prefer the model and its interval over reading a cut-off from the raw bands.
+- **The threshold would label `r format(n_obs_nightjar, big.mark = ",")` of the `r format(n_pred_nightjar, big.mark = ",")` Nightjar predictions (`r scales::percent(n_obs_nightjar / n_pred_nightjar, accuracy = 1)`) as observations.** The wide interval means that number would move noticeably if the true threshold were at either end of it. Whether to operate at the point estimate or the more cautious end of the interval is a decision I come back to once all four species are fitted.
+
+### 2.3 Oriole and Plover: when the standard fit breaks
+
+The Oriole and Plover were almost never wrong in the validation set: 150 of 150 and 149 of 150 clips were correct. That breaks the standard method in a specific way, so it needs its own treatment.
+
+**What goes wrong.** An ordinary logistic regression chooses the curve that fits the data best. When every clip (or all but one) is correct, the best-fitting curve is a perfect step from "wrong" to "right", and the slope of the fitted line runs off towards infinity. The standard software either reports a nonsensical slope and warns about "separation", or returns an estimate that depends almost entirely on one clip. The paper's formula for the threshold divides by that slope, so it breaks too.
+
+**What I use instead: Firth regression.** Firth's method is a standard fix for this problem. It adds a small penalty that stops the coefficients running away, so the estimates stay finite and the intervals stay sensible. It is still a logistic regression on the logit score, so it stays within the method in the paper. The price is that it pulls the fit towards a flatter line, and it cannot create information that the data do not contain.
+
+**A rule for turning any fitted line into a threshold.** The paper's formula only makes sense when the slope is positive and the 99% point lies inside the range of scores that were actually validated. So I apply this rule to every fit:
+
+1. If the fitted probability of being correct is already at least 99% at the **lowest validated score**, the threshold is that lowest validated score. Every prediction at or above it counts as an observation.
+2. Otherwise, if the fitted line never reaches 99% within the validated range (or the slope is not positive), there is **no threshold**, and no predictions for that species can be called observations.
+3. Otherwise, the threshold is the score where the fitted line crosses 99%, using the paper's formula.
+
+```{r op-fits}
+op_species <- c("African Black-headed Oriole", "Three-banded Plover")
+op_data <- map(set_names(op_species), function(sp) {
+  validation %>% filter(commonName == sp) %>% mutate(logit_score = to_logit(confidence))
+})
+
+# The three-part rule described above
+apply_rule <- function(b0, b1, d) {
+  lowest <- min(d$logit_score)
+  highest <- max(d$logit_score)
+  p_lowest <- plogis(b0 + b1 * lowest)
+  p_highest <- plogis(b0 + b1 * highest)
+  if (p_lowest >= p_target) {
+    tibble(p_lowest = p_lowest, outcome = "Met at the lowest validated score", threshold = from_logit(lowest))
+  } else if (b1 <= 0 || p_highest < p_target) {
+    tibble(p_lowest = p_lowest, outcome = "Not reached within the validated range", threshold = NA_real_)
+  } else {
+    tibble(p_lowest = p_lowest, outcome = "Reached within the validated range",
+           threshold = from_logit((target_logit - b0) / b1))
+  }
+}
+
+# Fit both the plain and the Firth model, noting whether the plain fit warned
+fit_both <- function(d) {
+  warned <- FALSE
+  plain <- withCallingHandlers(
+    glm(outcome ~ logit_score, family = binomial, data = d),
+    warning = function(w) { warned <<- TRUE; invokeRestart("muffleWarning") })
+  list(plain = plain, firth = logistf::logistf(outcome ~ logit_score, data = d), warned = warned)
+}
+op_fits <- map(op_data, fit_both)
+
+op_results <- imap_dfr(op_fits, function(f, sp) {
+  d <- op_data[[sp]]
+  firth_interval <- sprintf("%.2f to %.2f", f$firth$ci.lower[2], f$firth$ci.upper[2])
+  bind_rows(
+    tibble(Species = sp, Method = ifelse(f$warned, "Plain logistic regression (did not converge)", "Plain logistic regression"),
+           Slope = coef(f$plain)[2], `Slope 95% interval` = "") %>%
+      bind_cols(apply_rule(coef(f$plain)[1], coef(f$plain)[2], d)),
+    tibble(Species = sp, Method = "Firth", Slope = coef(f$firth)[2], `Slope 95% interval` = firth_interval) %>%
+      bind_cols(apply_rule(coef(f$firth)[1], coef(f$firth)[2], d))
+  )
+})
+
+op_results %>%
+  transmute(Species, Method,
+            Slope = round(Slope, 2),
+            `Slope 95% interval`,
+            `Probability correct at lowest validated score` = scales::percent(p_lowest, accuracy = 0.1),
+            Outcome = outcome,
+            Threshold = round(threshold, 3)) %>%
+  knitr::kable(align = "llrrrll")
+```
+
+**Reading the table.**
+
+- **Oriole, plain regression:** it did not converge. The slope is essentially zero and the intercept is very large, which is the "perfect step" problem showing up as meaningless coefficients.
+- **Oriole, Firth:** the estimates are finite but the slope is slightly *negative*, and its interval is wide and spans zero. In other words the score carries no usable information about whether an Oriole prediction is right, because almost all of them are. The fitted probability of being correct is already above 99% at the lowest validated score, so the rule gives the lowest validated score as the threshold. Applying the paper's formula directly here would give a meaningless answer, because the slope is not positive.
+- **Plover, plain regression:** it converges, because there is one incorrect clip to anchor it, and it gives a threshold of about 0.26.
+- **Plover, Firth:** the slope is much smaller, and its interval also spans zero. The fitted probability starts a little below 99% at the lowest score and crosses it at about 0.82.
+
+The two Plover thresholds (0.26 and 0.82) differ by a factor of three. One incorrect clip is driving the whole answer, which is the sign that this threshold is **weakly identified**: the data barely show how the chance of being correct changes with score.
+
+```{r op-plot, fig.width=8, fig.height=4.5, fig.alt="Two panels, for the Oriole and the Plover, showing the plain and Firth fitted probability that a prediction is correct against BirdNET confidence, with the validated clips grouped into score bands and a dashed line at 99 percent. The vertical axis starts at 90 percent."}
+op_curves <- imap_dfr(op_data, function(d, sp) {
+  grid <- tibble(logit_score = seq(min(d$logit_score), max(d$logit_score), length.out = 100))
+  f <- op_fits[[sp]]
+  bind_rows(
+    mutate(grid, Species = sp, Method = "Plain", p = plogis(coef(f$plain)[1] + coef(f$plain)[2] * logit_score)),
+    mutate(grid, Species = sp, Method = "Firth", p = plogis(coef(f$firth)[1] + coef(f$firth)[2] * logit_score))
+  )
+})
+
+op_bands <- imap_dfr(op_data, function(d, sp) {
+  d %>%
+    mutate(band = cut(confidence, seq(0.1, 1, by = 0.1), include.lowest = TRUE)) %>%
+    group_by(band) %>%
+    summarise(n = n(), share_correct = mean(outcome), logit_score = mean(logit_score), .groups = "drop") %>%
+    mutate(Species = sp)
+})
+
+ggplot() +
+  geom_hline(yintercept = p_target, linetype = "dashed", colour = ink) +
+  geom_line(data = op_curves, aes(logit_score, p, linetype = Method), colour = "#0b0b0b", linewidth = 0.8) +
+  geom_point(data = op_bands, aes(logit_score, share_correct, size = n), colour = col_val) +
+  facet_wrap(~Species) +
+  scale_x_continuous(breaks = to_logit(conf_ticks), labels = conf_ticks) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_linetype_manual(values = c(Firth = "solid", Plain = "dashed"), name = "Fitted curve") +
+  scale_size_area(max_size = 5, name = "Clips in band") +
+  coord_cartesian(ylim = c(0.9, 1)) +
+  labs(x = "BirdNET confidence (axis spaced on the logit scale)",
+       y = "Probability the prediction is correct") +
+  bird_theme
+```
+
+The vertical axis starts at 90%, because everything of interest here is close to 100%. Both curves for the Oriole sit above the 99% line across the whole range (the Firth curve even drifts very slightly downward, reflecting its slightly negative slope). For the Plover, the plain curve (dashed) rises through 99% early, while the Firth curve (solid) is flatter and crosses later. The orange points show that the one incorrect Plover clip falls in the 0.2 to 0.3 band.
+
+**How stable is this?** I refit the Firth model on 500 resamples of each species' clips and recorded which branch of the rule each resample landed in:
+
+```{r op-bootstrap}
+set.seed(2026)
+op_boot <- imap_dfr(op_data, function(d, sp) {
+  map_dfr(seq_len(500), function(i) {
+    resample <- d[sample(nrow(d), replace = TRUE), ]
+    f <- logistf::logistf(outcome ~ logit_score, data = resample)
+    mutate(apply_rule(coef(f)[1], coef(f)[2], d), Species = sp)
+  })
+})
+
+op_boot %>%
+  count(Species, outcome) %>%
+  group_by(Species) %>%
+  mutate(`Share of resamples` = scales::percent(n / sum(n), accuracy = 1)) %>%
+  ungroup() %>%
+  select(Species, Outcome = outcome, Resamples = n, `Share of resamples`) %>%
+  knitr::kable(align = "llrr")
+
+plover_reached <- op_boot %>%
+  filter(Species == "Three-banded Plover", outcome == "Reached within the validated range")
+plover_interval <- quantile(plover_reached$threshold, c(0.025, 0.5, 0.975))
+plover_share_met <- mean(op_boot$outcome[op_boot$Species == "Three-banded Plover"] == "Met at the lowest validated score")
+```
+
+For the Oriole, every resample lands in the same place: 99% is already met at the lowest score. For the Plover, about `r scales::percent(plover_share_met, accuracy = 1)` of resamples contain no incorrect clip at all (that is the chance of leaving out the single incorrect clip when resampling 150 clips), and in those the answer is the same as the Oriole's. In the rest, the Firth threshold has a median of `r round(plover_interval[2], 2)` and a 95% range of `r round(plover_interval[1], 2)` to `r round(plover_interval[3], 2)`. So the Plover's threshold is really one of two answers, "no threshold needed" or "somewhere around 0.8 to 0.9", depending on whether the one error is in the sample.
+
+**Can the data certify 99% at all?** A model can estimate a probability above 99%, but with 150 clips the data cannot demonstrate it. If every one of n clips is correct, the 95% lower confidence limit on the true share correct is `0.05^(1/n)`, which is about 98% for n = 150:
+
+```{r op-binomial}
+lower_bound_table <- function(d, label) {
+  d %>%
+    group_by(Species = commonName) %>%
+    summarise(`Validated clips` = label, Clips = n(), Correct = sum(outcome), .groups = "drop") %>%
+    mutate(`Lowest plausible share correct (95%)` =
+             scales::percent(qbeta(0.05, Correct, Clips - Correct + 1), accuracy = 0.1))
+}
+
+op_validation <- filter(validation, commonName %in% op_species)
+
+bind_rows(
+  lower_bound_table(op_validation, "All validated clips"),
+  lower_bound_table(filter(op_validation, confidence >= 0.5), "Scoring 0.5 or higher")
+) %>%
+  arrange(Species, `Validated clips`) %>%
+  knitr::kable(align = "llrrr")
+```
+
+Even the Oriole's perfect record is statistically consistent with a true precision of about 98%, and restricting to the higher-scoring clips does not help, because there are fewer of them. This is a limit of the validation sample size, not of the method.
+
+**What I take from this.**
+
+```{r op-observations}
+oriole_floor <- from_logit(min(op_data[["African Black-headed Oriole"]]$logit_score))
+n_pred_oriole <- sum(predictions$common_name == "African Black-headed Oriole")
+n_below_floor <- sum(predictions$common_name == "African Black-headed Oriole" & predictions$confidence < oriole_floor)
+
+plover_firth <- filter(op_results, Species == "Three-banded Plover", Method == "Firth")$threshold
+n_pred_plover <- sum(predictions$common_name == "Three-banded Plover")
+n_obs_plover  <- sum(predictions$common_name == "Three-banded Plover" & predictions$confidence >= plover_firth)
+```
+
+- **Oriole:** the data are consistent with at least 99% of Oriole predictions being correct at every score, so the rule gives the lowest validated score, `r round(oriole_floor, 3)`, as the threshold. In practice that means every Oriole prediction is labelled an observation (all `r format(n_pred_oriole, big.mark = ",")` of them). The rule strictly covers all but `r n_below_floor` predictions that score between 0.100 and `r round(oriole_floor, 3)`, just below the lowest score anyone checked. I include those too, because the fitted probability is flat across the whole validated range and the gap is only about 0.004, and I flag it as a small extrapolation. I will record this as **weakly supported**: the sample cannot rule out a precision of about 98%.
+- **Plover:** the primary threshold is the Firth estimate, `r round(plover_firth, 2)`, which would label `r format(n_obs_plover, big.mark = ",")` of the `r format(n_pred_plover, big.mark = ",")` Plover predictions as observations. I choose Firth over the plain fit because it is the more cautious of the two and does not hinge on one clip. I will record this as **weakly identified**, with the range above and the plain-fit alternative of about 0.26 for comparison.

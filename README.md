@@ -5,7 +5,7 @@ A take-home assignment for Natural State's Senior Data Scientist role covering B
 
 | Deliverable | Status |
 |---|---|
-| Bird challenge (BirdNET thresholds) | In progress. Data exploration and QC are done; modelling is next. |
+| Bird challenge (BirdNET thresholds) | In progress. Data exploration and QC are done. Modelling: the reference fit for one species (Nightjar) is done; the other three species are next. |
 | Vegetation challenge (data quality report) | Not started. |
 
 ## Repository layout
@@ -45,13 +45,13 @@ The bird analysis is written in R, to match how Natural State's Biometrics team 
 
 **Requirements**
 - R 4.6.1 (earlier 4.x versions are likely to work but are untested)
-- The R packages `tidyverse`, `rmarkdown` and `knitr`
+- The R packages `tidyverse`, `rmarkdown` and `knitr` (the modelling section also uses `mgcv`, which is installed with R by default)
 - Pandoc, which is bundled with RStudio
 
 **Steps**
 1. Install the packages once:
    ```r
-   install.packages(c("tidyverse", "rmarkdown", "knitr"))
+   install.packages(c("tidyverse", "rmarkdown", "knitr", "logistf"))
    ```
 2. Put the data in place and set `data_dir` as described above.
 3. Open `Data_Birds/bird_analysis.Rmd` in RStudio and click **Knit**, or run:
@@ -61,4 +61,4 @@ The bird analysis is written in R, to match how Natural State's Biometrics team 
 
 This regenerates `bird_analysis.md` and the figures from the raw files. The QC check tables, summary tables and figures are computed when the document is knitted. The field-by-field schema tables and some figures quoted in the surrounding text are written by hand from what the code showed, so recheck them if the data changes.
 
-More packages (for example `broom` and `logistf`) will be added to this list when the modelling section is added.
+`logistf` provides the Firth regression used for the species with almost no incorrect validation clips. Further packages will be added here if later sections need them.
