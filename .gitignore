@@ -218,3 +218,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# macOS
+.DS_Store
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+
+# Secrets / local config
+.env
+
+# Large or restricted data (decide below)
+# data/raw/
