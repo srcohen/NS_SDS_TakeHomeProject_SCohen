@@ -234,3 +234,8 @@ renv/library/
 
 # Large or restricted data (decide below)
 # data/raw/
+*.csv
+*.xlsx
+*.wav
+.DS_Store
+config.local
