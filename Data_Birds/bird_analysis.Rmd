@@ -900,19 +900,33 @@ predictions_labelled <- predictions %>%
 # Written next to the input data, outside the repository
 write_csv(predictions_labelled, file.path(bird_dir, "birdnet_predictions_labelled.csv"), na = "")
 
+```
+
+**Table 1. Species thresholds: calculated in section 2 and used to label predictions.** This is the table that the labelling step reads. For each species it gives the lowest confidence score at which a prediction is labelled as an observation, how that score was derived, and how well the data support it. In a pipeline this would be stored as its own small table (one row per species), separate from the predictions.
+
+```{r thresholds-table, echo=FALSE}
+thresholds %>%
+  transmute(Species = species,
+            `Threshold (confidence score)` = ifelse(is.na(threshold), "none", format(round(threshold, 3), nsmall = 3)),
+            `How it was derived` = basis,
+            `Support from the data` = support) %>%
+  knitr::kable(align = "lrll")
+```
+
+**Table 2. Result of applying the thresholds: predictions labelled as observations.**
+
+```{r labelling-result-table, echo=FALSE}
 predictions_labelled %>%
   group_by(species = common_name) %>%
   summarise(Predictions = n(), Observations = sum(!is.na(observation)), .groups = "drop") %>%
-  left_join(thresholds, by = "species") %>%
   mutate(`Share labelled` = scales::percent(Observations / Predictions, accuracy = 1),
-         Threshold = ifelse(is.na(threshold), "none", format(round(threshold, 3), nsmall = 3)),
          Predictions = format(Predictions, big.mark = ","),
          Observations = format(Observations, big.mark = ",")) %>%
-  select(Species = species, Threshold, Predictions, Observations, `Share labelled`, Support = support) %>%
-  knitr::kable(align = "lrrrrl")
+  select(Species = species, Predictions, Observations, `Share labelled`) %>%
+  knitr::kable(align = "lrrr")
 ```
 
-Two things to keep in mind when reading this table.
+Two things to keep in mind when reading these tables.
 
 **1. The Oriole threshold is 0.100, not 0.104.** The three-part rule in section 2.3 says that when the fitted curve is already at 99% or above at the lowest score a human actually checked, the threshold is that lowest checked score. For the Oriole, the lowest score in `validation_results.csv` is `r round(oriole_floor, 3)`. But `birdnet_predictions.csv` contains `r n_below_floor` Oriole predictions that score between 0.100 (the lowest score BirdNET saved) and `r round(oriole_floor, 3)`, below anything that was checked. Applying the rule strictly would leave those unlabelled. I label them too, because the fitted curve is flat across the whole checked range and the gap is only about 0.004, so the threshold in this table is set to 0.100. This is a small extrapolation beyond the validated scores.
 

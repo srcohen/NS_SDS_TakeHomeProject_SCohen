@@ -1075,27 +1075,33 @@ predictions_labelled <- predictions %>%
 
 # Written next to the input data, outside the repository
 write_csv(predictions_labelled, file.path(bird_dir, "birdnet_predictions_labelled.csv"), na = "")
-
-predictions_labelled %>%
-  group_by(species = common_name) %>%
-  summarise(Predictions = n(), Observations = sum(!is.na(observation)), .groups = "drop") %>%
-  left_join(thresholds, by = "species") %>%
-  mutate(`Share labelled` = scales::percent(Observations / Predictions, accuracy = 1),
-         Threshold = ifelse(is.na(threshold), "none", format(round(threshold, 3), nsmall = 3)),
-         Predictions = format(Predictions, big.mark = ","),
-         Observations = format(Observations, big.mark = ",")) %>%
-  select(Species = species, Threshold, Predictions, Observations, `Share labelled`, Support = support) %>%
-  knitr::kable(align = "lrrrrl")
 ```
 
-| Species | Threshold | Predictions | Observations | Share labelled | Support |
-|:---|---:|---:|---:|---:|:---|
-| Abyssinian Nightjar | 0.667 | 10,187 | 3,147 | 31% | Solid |
-| African Black-headed Oriole | 0.100 | 18,054 | 18,054 | 100% | Weak |
-| Red-billed Firefinch | none | 235 | 0 | 0% | No threshold |
-| Three-banded Plover | 0.817 | 1,015 | 114 | 11% | Weakly identified |
+**Table 1. Species thresholds: calculated in section 2 and used to label
+predictions.** This is the table that the labelling step reads. For each
+species it gives the lowest confidence score at which a prediction is
+labelled as an observation, how that score was derived, and how well the
+data support it. In a pipeline this would be stored as its own small
+table (one row per species), separate from the predictions.
 
-Two things to keep in mind when reading this table.
+| Species | Threshold (confidence score) | How it was derived | Support from the data |
+|:---|---:|:---|:---|
+| Abyssinian Nightjar | 0.667 | Logistic regression, point where the fitted probability reaches 99% | Solid |
+| African Black-headed Oriole | 0.100 | Firth; 99% already met at the lowest validated score, so every prediction qualifies | Weak |
+| Three-banded Plover | 0.817 | Firth, point where the fitted probability reaches 99% | Weakly identified |
+| Red-billed Firefinch | none | 99% not reached within the validated range, so no threshold | No threshold |
+
+**Table 2. Result of applying the thresholds: predictions labelled as
+observations.**
+
+| Species                     | Predictions | Observations | Share labelled |
+|:----------------------------|------------:|-------------:|---------------:|
+| Abyssinian Nightjar         |      10,187 |        3,147 |            31% |
+| African Black-headed Oriole |      18,054 |       18,054 |           100% |
+| Red-billed Firefinch        |         235 |            0 |             0% |
+| Three-banded Plover         |       1,015 |          114 |            11% |
+
+Two things to keep in mind when reading these tables.
 
 **1. The Oriole threshold is 0.100, not 0.104.** The three-part rule in
 section 2.3 says that when the fitted curve is already at 99% or above
