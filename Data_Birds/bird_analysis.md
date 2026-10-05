@@ -1,5 +1,7 @@
-NS Take-Home Assignment - Bird Challenge
+NS Take-Home Assignment - Bird Challenge - Part 1. Analysis
 ================
+Samantha Cohen
+2026-10-04
 
 ## Contents
 
@@ -36,8 +38,9 @@ NS Take-Home Assignment - Bird Challenge
 *prediction*: one species predicted in one 3-second segment of one audio
 file, with a confidence score of at least 0.1. The field layout is the
 Raven selection-table format that BirdNET writes out. Descriptions below
-are my reading of the data and the take-home assignment description;
-items marked *(inferred)* are not stated in the description.
+are my understanding of the data and the take-home assignment
+description; items marked *(inferred)* are not stated in the
+description.
 
 | Field | Type | Description | Observed in this dataset |
 |----|----|----|----|
@@ -99,12 +102,12 @@ predictions %>% count(common_name, species_code, sort = TRUE)
     ## 3 Three-banded Plover         thbplo1       1015
     ## 4 Red-billed Firefinch        rebfir2        235
 
-#### QC checks: predictions
+#### QC checks: birdnet_predictions.csv data set
 
 Each check is computed from the data when this document is knitted.
-**PASS** means nothing to act on. **FLAG** means a problem I have to
-handle in the analysis. **INFO** means an oddity to be aware of and
-record, not necessarily a problem.
+**PASS** means nothing to act on. **FLAG** means a problem to address
+during analysis. **INFO** means an oddity to be aware of and record, not
+necessarily a problem.
 
 | Check | Result | Status |
 |:---|:---|:--:|
@@ -218,7 +221,7 @@ Firefinch was almost always wrong. The lowest and highest scores show
 the range of confidence each species was validated across, which limits
 where a fitted curve can be trusted.
 
-#### QC checks: validation
+#### QC checks: validation_results.csv
 
 | Check | Result | Status |
 |:---|:---|:--:|
@@ -244,8 +247,24 @@ rule; this is a modelling decision I make in the next section.
 
 ### 1.3 Cross-file checks
 
-The two files should describe the same recordings and species. These
-checks compare them directly.
+The two files should describe the same recordings and species because
+the thresholds are calculated from the validation clips and then applied
+to the predictions. This only works if the two cover the same species,
+and ideally the same recordings an conditions. Wood & Kahl (2024) says a
+threshold holds only for the conditions it was built on, such as the
+same recorders, season, and place. Therefore, a discrepancy means the
+same thresholds may not carry over. These checks compare them directly.
+
+In principle, the validation data is a subset of predictions. Each
+validation clip was cut from one BirdNET prediction, and an
+ornithologist then marked it correct or incorrect. The two files have no
+shared ID, so we match by comparing three things
+
+| What | In Predictions | In Validation |
+|:---|:---|:---|
+| Recording | `begin_path` (e.g. `Grid2/RBS21/RBS21_20230630_190000.WAV`) | Inside `filename` (e.g. `RBS21_20230630_190000`) |
+| Species | `common_name` | `commonName` |
+| Score | `confidence` (4 decimals), rounded to 3 | `confidence` (3 decimals) |
 
 | Check | Result | Status |
 |:---|:---|:--:|
@@ -258,10 +277,13 @@ checks compare them directly.
 **Can the validated clips be traced back to a prediction?** Matching on
 recording, species and confidence (to 3 decimals):
 
-| Recording start | No matching prediction | One matching prediction | Several matching predictions |
-|:---|---:|---:|---:|
-| Starts off the hour | 288 | 0 | 0 |
-| Starts on the hour | 10 | 207 | 46 |
+| Result | Clips | Share |
+|----|----|----|
+| Traced to exactly one prediction | 207 | 38% |
+| Could be one of several predictions (ambiguous) | 46 | 8% |
+| Not found: the recording is in Predictions, but no prediction has that species and score | 10 | 2% |
+| Not found: the recording is not in Predictions (it starts off the hour) | 288 | 52% |
+| **Total** | **551** | **100%** |
 
 All of the clips from off-the-hour recordings have no match, because
 every file in the predictions starts on the hour. So a large part of the
@@ -270,8 +292,8 @@ file. Most of the on-the-hour clips do match, but a few match several
 predictions (the same score occurs more than once in a file once it is
 rounded to 3 decimals). This does not stop the threshold fit, which
 needs only `confidence` and `outcome`, but it means I cannot say the
-validation set is a subset of this predictions file. For now flag and
-follow up with question before making a decision.
+validation set is a subset of this predictions file. For now flagging
+and to do here is follow up with question before making a decision.
 
 **Were the validated clips representative of the predictions?** Compare
 the score distributions:
@@ -400,12 +422,17 @@ about the data:
   are clipped to the range 0.0001 to 0.9999. The data never show a value
   between 0.9999 and 1, so this is the closest finite value. Section 2.2
   checks that the choice does not matter for the Nightjar.
-- **Sensitivity.** BirdNET’s logit is defined as `ln(c / (1 - c))`
-  divided by a sensitivity setting. The data do not record that setting,
-  so I assume the BirdNET default of 1. A different value would rescale
-  the logit axis but would not change which predictions fall above the
-  threshold, because the transform is the same monotonic stretch for
-  every score.
+
+- **Sensitivity.**
+
+  - BirdNET’s logit is defined as `ln(c / (1 - c))` divided by a
+    sensitivity setting (Wood &. Kahl (2024), page 4).
+  - The data do not record that setting, so I assume the BirdNET default
+    of 1 (BirdNET-Analyzer code birdnet_analyzer/cli.py, from
+    <https://github.com/kahst/BirdNET-Analyzer>.). A different value
+    would rescale the logit axis but would not change which predictions
+    fall above the threshold, because the transform is the same
+    monotonic stretch for every score.
 
 I start with the Nightjar as a reference case, because its validation
 data contain both correct and incorrect clips across the score range, so
@@ -640,7 +667,12 @@ coefficients running away, so the estimates stay finite and the
 intervals stay sensible. It is still a logistic regression on the logit
 score, so it stays within the method in the paper. The price is that it
 pulls the fit towards a flatter line, and it cannot create information
-that the data do not contain.
+that the data do not contain. *Heinze and Schemper (2002) show that when
+separation occurs the standard logistic regression estimates diverge to
+infinity, and that Firth’s penalized likelihood method gives finite
+estimates, with profile penalized-likelihood confidence intervals that
+often outperform standard Wald intervals. note that i could not access
+the full paper to reference*
 
 **A rule for turning any fitted line into a threshold.** The paper’s
 formula only makes sense when the slope is positive and the 99% point

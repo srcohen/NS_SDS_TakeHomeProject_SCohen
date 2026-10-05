@@ -25,24 +25,26 @@ This pipeline decides which predictions are reliable enough to be treated as **o
 
 ## 2. Overview
 
-The pipeline has a data processing step followed by two parts that are run sequentially and are joined by a **thresholds** table with one value for each species. **Data processing** checks the Predictions and Validation tables before they are used (section 5). **Part 1, threshold calibration,** works out a threshold for each species from the validation data. **Part 2, labeling,** compares every prediction's confidence score with its species' threshold and labels the ones that meet the threshold and can thus be labeled as observations. Calibration has to run first, because labeling needs the thresholds to exist.
+The pipeline starts with **data quality checks** (section 4) and **data processing** (section 5), followed by two parts that are run sequentially and are joined by a **thresholds** table with one value for each species. **Data quality checks** test the Predictions and Validation tables and give each check a status. **Data processing** then links the two tables by species name and uses every row. **Part 1, threshold calibration,** works out a threshold for each species from the validation data. **Part 2, labeling,** compares every prediction's confidence score with its species' threshold and labels the ones that meet the threshold and can thus be labeled as observations. Calibration has to run first, because labeling needs the thresholds to exist.
 
-### 2.1 Data processing and the two parts
+### 2.1 The steps and the two parts
 
-| | Data processing | Part 1: Threshold calibration | Part 2: Labeling |
-|---|---|---|---|
-| **What it does** | Checks each table against the rules in section 3 and links the two tables by species name. Nothing is added, changed or removed | Works out the minimum confidence score for each species at which a prediction counts as an observation | Labels each prediction as an observation if its score reaches its species' threshold |
-| **Reads** | Predictions and Validation | The checked Validation table | The checked Predictions table and thresholds |
-| **Writes** | Nothing new: the checked tables are the same as the input tables | Thresholds | Labeled output |
-| **When it runs** | As the first step of Part 1 (on Validation) and of Part 2 (on Predictions) | At setup, then only when new validation data arrive or conditions change | Automatically, whenever new predictions are stored |
-| **Run by** | The platform, as part of Part 1 and Part 2 | A data scientist, who reviews the result before it is used downstream | The platform, with no manual step |
+| | Data quality checks | Data processing | Part 1: Threshold calibration | Part 2: Labeling |
+|---|---|---|---|---|
+| **What it does** | Tests each table, and the two tables against each other, and gives each check a status: PASS, FLAG, INFO or STOP | Links the two tables by species name and uses every row. Nothing is added, changed or removed | Works out the minimum confidence score for each species at which a prediction counts as an observation | Labels each prediction as an observation if its score reaches its species' threshold |
+| **Reads** | Predictions and Validation | Predictions and Validation, once the checks have run | The checked Validation table | The checked Predictions table and thresholds |
+| **Writes** | The result of each check | Nothing new: the tables are the same as the input tables | Thresholds | Labeled output |
+| **When it runs** | Checks on Predictions run every time new predictions are stored. Checks on Validation and across the two tables run every time thresholds are calculated | Straight after the checks, in the same two situations | At setup, then only when new validation data arrive or conditions change | Automatically, whenever new predictions are stored |
+| **Run by** | The platform, as the first step of Part 1 and Part 2 | The platform, as part of Part 1 and Part 2 | A data scientist, who reviews the result before it is used downstream | The platform, with no manual step |
+
+If any data quality check gives STOP, the run stops and nothing after it runs (section 4).
 
 ### 2.2 The four data tables
 
 | Name | What it is | Where it comes from | Used by |
 |---|---|---|---|
-| **Predictions** | BirdNET's output: one row per prediction, giving the species, the confidence score, and which recording and which 3-second segment it came from | The existing ML pipeline, after each upload | Data processing, then Part 2 |
-| **Validation** | Predictions that an ornithologist has listened to and marked correct or incorrect | The ornithologists' review (how this is captured on the platform is an open question) | Data processing, then Part 1 |
+| **Predictions** | BirdNET's output: one row per prediction, giving the species, the confidence score, and which recording and which 3-second segment it came from | The existing ML pipeline, after each upload | Data quality checks, data processing, then Part 2 |
+| **Validation** | Predictions that an ornithologist has listened to and marked correct or incorrect | The ornithologists' review (how this is captured on the platform is an open question) | Data quality checks, data processing, then Part 1 |
 | **Thresholds** | One row per species: the minimum confidence score at which a prediction becomes an observation, or "none" if the species has no usable threshold | Written by Part 1 | Part 2 |
 | **Labeled output** | Each prediction, together with its `observation` value (the species name, or empty) | Written by Part 2 | Dashboards and project reports |
 
@@ -50,19 +52,23 @@ The pipeline has a data processing step followed by two parts that are run seque
 
 ```mermaid
 flowchart TD
+    SME["Ornithologist (subject matter expert)<br/>listens to a sample of predictions<br/>and marks each correct or incorrect"]
     U["SD card upload and BirdNET<br/>(already built)"]
     P[("Predictions")]
     V[("Validation")]
-    DP["Data processing<br/>check the tables, link by species name,<br/>use every row"]
+    QC["Data quality checks<br/>PASS, FLAG, INFO or STOP"]
+    DP["Data processing<br/>link by species name,<br/>use every row"]
     P1["Part 1: Threshold calibration<br/>run by a data scientist, occasionally"]
     T[("Thresholds<br/>one row per species")]
     P2["Part 2: Labeling<br/>automatic, on every new prediction"]
     L[("Labeled output")]
     D["Dashboards and reports<br/>(out of scope)"]
 
+    SME -.-> V
     U -.-> P
-    P --> DP
-    V --> DP
+    P --> QC
+    V --> QC
+    QC --> DP
     DP -->|Validation| P1
     DP -->|Predictions| P2
     P1 --> T
@@ -71,7 +77,7 @@ flowchart TD
     L -.-> D
 ```
 
-In words: BirdNET's predictions are stored as **predictions**. The **predictions** and **validation** tables both go through data processing, which checks them. The checked validation data go into Part 1, which writes the **thresholds**. The checked predictions go into Part 2 together with the thresholds, and Part 2 writes the **labeled output**, which dashboards and reports then use. The dashed arrows mark the parts that are already built or out of scope.
+In words: an ornithologist listens to a sample of BirdNET's predictions and marks each one correct or incorrect, which produces the **validation** table. BirdNET's predictions are stored as the **predictions** table. Both tables go through the data quality checks and then data processing. The checked validation data go into Part 1, which writes the **thresholds**. The checked predictions go into Part 2 together with the thresholds, and Part 2 writes the **labeled output**, which dashboards and reports then use. The dashed arrows mark the parts that are already built or out of scope, including how the ornithologist's work is recorded.
 
 ### 2.4 The order of events
 
@@ -79,41 +85,41 @@ In words: BirdNET's predictions are stored as **predictions**. The **predictions
 sequenceDiagram
     participant DS as Data scientist
     participant P1 as Part 1 (calibration)
-    participant DP as Data processing
+    participant CP as Checks and processing
     participant TH as Thresholds
     participant PL as Platform
     participant P2 as Part 2 (labeling)
 
     Note over DS,TH: Setup, done once
     DS->>P1: run on the validation data
-    P1->>DP: check the validation data
-    DP-->>P1: checked validation data
+    P1->>CP: check and process the validation data
+    CP-->>P1: checked validation data (stops if a check gives STOP)
     P1->>TH: write the thresholds (version 1)
     DS->>TH: review and approve
 
     Note over PL,P2: Every time new predictions are stored
-    PL->>DP: new predictions arrive
-    DP->>P2: checked predictions
+    PL->>CP: new predictions arrive
+    CP->>P2: checked predictions (stops if a check gives STOP)
     P2->>TH: read the thresholds
     P2->>PL: write the labeled output
 
     Note over DS,TH: Later, when new validation data arrive or conditions change
     DS->>P1: run again
-    P1->>DP: check the new validation data
-    DP-->>P1: checked validation data
+    P1->>CP: check and process the new validation data
+    CP-->>P1: checked validation data
     P1->>TH: write the thresholds (version 2)
     DS->>TH: review and approve
-    PL->>DP: later predictions arrive
-    DP->>P2: checked predictions
+    PL->>CP: later predictions arrive
+    CP->>P2: checked predictions
     P2->>TH: read the thresholds (version 2)
 ```
 
 In words:
 
-1. Part 1 runs first. The validation data available at the time go through data processing, and the checked data are used to work out the thresholds, which Part 1 writes. A data scientist reviews them before they are used.
-2. From then on, whenever new predictions are stored, they go through data processing, and Part 2 runs automatically on the checked predictions. It reads the current thresholds and writes the labeled output.
-3. When new validation data arrive, or conditions change (the section on when to recalibrate lists them), Part 1 runs again: the new validation data go through data processing, a data scientist reviews the new thresholds, and later predictions are labeled with the new version.
-4. Before the first calibration there are no thresholds. In that case Part 2 leaves every prediction unlabeled. Labeling nothing is the safe default.
+1. Part 1 runs first. The validation data available at the time go through the data quality checks and data processing, and the checked data are used to work out the thresholds, which Part 1 writes. A data scientist reviews them before they are used.
+2. From then on, whenever new predictions are stored, they go through the data quality checks and data processing, and Part 2 runs automatically on the checked predictions. It reads the current thresholds and writes the labeled output.
+3. When new validation data arrive, or conditions change (the section on when to recalibrate lists them), Part 1 runs again: the new validation data go through the checks and processing, a data scientist reviews the new thresholds, and later predictions are labeled with the new version.
+4. Before the first calibration there are no thresholds. In that case Part 2 leaves every prediction unlabeled. Labeling nothing is the safe default. Separately, if any data quality check gives STOP at any point, the run stops.
 
 ### 2.5 A worked example
 
@@ -253,15 +259,55 @@ None of the clips from off-the-hour recordings can match, because every recordin
 
 ## 5. Data processing
 
-This section describes what is done to the Predictions and Validation tables before the analysis (calculating the thresholds, then labeling). It matches what was done in the sample analysis: the tables are checked and then used as they are. No column is added, no value is changed, and no row is removed.
+This section describes what is done to the Predictions and Validation tables before the analysis (calculating the thresholds, then labeling). It follows the data quality checks in section 4 and matches what was done in the sample analysis: the tables are used as they are. No column is added, no value is changed, and no row is removed.
 
 | Step | What is done | What happened in the sample analysis |
 |---|---|---|
 | 1 | Read both tables as received | Predictions (29,491 rows, 13 columns) and Validation (551 rows, 6 columns) were read from `birdnet_predictions.csv` and `validation_results.csv` |
-| 2 | Check each table against the rules in section 3, and check the two tables against each other. Report the results | Every structural rule passed. The checks raised warnings but none stopped the analysis: 4 predictions and 2 validation clips have a score of exactly 1.0; one species (the Oriole) has only correct validation clips, and another (the Plover) has just one incorrect clip; 11 of 43 recorders have no validation clips; 288 of 551 validation clips come from recordings that start off the hour |
+| 2 | Run the data quality checks in section 4, and continue only if none of them gives STOP | All the checks were run. None gave STOP, so the analysis continued. The FLAG and INFO results are listed in section 4 |
 | 3 | Use the species name to link the two tables: Validation rows are grouped by `commonName` when thresholds are calculated, and thresholds are applied to Predictions by `common_name`. The two columns must hold the same species values | Both tables have the same four species, spelled identically |
 | 4 | Use every row. No row is removed or changed. Validation rows that cannot be traced back to a prediction are reported and kept | All 551 validation rows were used to calculate thresholds, and all 29,491 predictions were labeled. 288 of the 551 validation rows could not be traced to a prediction, because they come from recordings that are not in Predictions, and they were kept |
 
 Two things that involve the scores happen later, and are not changes to the tables. Scores of exactly 1.0 are clipped to just below 1 when thresholds are calculated, because their logit is infinite. Labeling compares each prediction's original score with its species' threshold. Both are described in the sections on calibration and labeling.
 
 The prepared tables are the same as the input tables. The Validation table is what the threshold calibration reads, and the Predictions table is what labeling reads.
+
+## 6. Part 1: Threshold calibration
+
+### 6.1 What Part 1 does
+
+Part 1 reads the checked Validation table and writes one threshold for each species: the lowest confidence score at which a prediction of that species is treated as an observation. The standard is the one set in the assignment: a prediction counts as an observation if there is at least a 99% probability that it is correct.
+
+The method follows Wood & Kahl (2024). It uses the clips the ornithologist checked to learn how a confidence score relates to the probability of being correct, using a logistic regression, and then finds the score at which that probability reaches 99%. This is done separately for each species, because the same score means different things for different species.
+
+Part 1 is run by a data scientist, at setup and again when new validation data arrive or conditions change. The result is reviewed before it is used.
+
+**What comes from where.** The paper provides the logistic regression on the logit of the confidence score, and the formula for the threshold. Several things in this section are not from the paper or the assignment. They are my own design choices, which the sample analysis used: clipping the scores, using Firth regression, the rule for choosing it, the rule for turning a fitted line into a threshold, and the support levels. Each is marked "my design" where it appears.
+
+### 6.2 The steps, for each species
+
+The steps below are repeated for each species in the Validation table.
+
+**Step 1. Select the species' clips.** Take the rows of the checked Validation table where `commonName` is that species. The sample had a single BirdNET version, so no further selection by `vBirdNET` was needed.
+
+**Step 2. Transform the confidence scores.** Two operations, in this order:
+
+- **Clip** `confidence` so that it is no lower than 0.0001 and no higher than 0.9999 *(my design)*.
+- **Take the logit** of the clipped score `c`: `ln(c / (1 - c))`.
+
+Why: on the 0 to 1 scale, scores near 1 are squeezed close together, and the logit spreads them out. The paper recommends fitting on the logit scale for this reason. The clipping is needed because the logit of exactly 1 is infinite. In the sample, only 2 Validation clips scored exactly 1.0, both for the Nightjar, and the Nightjar threshold was the same when scores were clipped at 0.001, 0.0001 or 0.00001.
+
+One assumption sits behind this step. BirdNET's own definition of the logit divides by a "sensitivity" setting. The sample does not record that setting, so the sample analysis assumed BirdNET's default value of 1. A different value would change the scale of the logit but not which predictions end up above the threshold.
+
+**Step 3. Fit a logistic regression.** Fit a model that relates the outcome (`1` correct, `0` incorrect) to the logit score. For any score, the fitted model gives the probability that a prediction is correct. It has an intercept and a slope, and the fitting method also reports a 95% interval for the slope.
+
+Two versions of the fit are used, and the choice between them is my design:
+
+- **Standard logistic regression** is the default.
+- **Firth regression** is used when the species has fewer than 10 correct clips or fewer than 10 incorrect clips.
+
+Why: when almost every clip is correct, or almost every clip is incorrect, the standard fit pushes the slope towards infinity (called separation) and gives meaningless results. Firth regression adds a small penalty that keeps the estimates finite.
+
+In the sample, the Nightjar (117 correct, 33 incorrect) used the standard fit. The Oriole (150 correct, 0 incorrect), the Plover (149 correct, 1 incorrect) and the Firefinch (6 correct, 95 incorrect) used Firth regression. In the sample analysis the choice was made by looking at each species. The rule above gives the same choice for all four.
+
+The sample analysis was done in R, using `glm` for the standard fit and `logistf` for Firth regression. The requirements do not say which tools the Tech team should use.
