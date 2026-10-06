@@ -3,6 +3,18 @@
 Requirements for BirdNET data pipeline to automate and manage data processing, analysis, and output for downstream
 use cases.
 
+## Contents
+
+1. [Context and Purpose](#1-context-and-purpose)
+2. [Pipeline Overview](#2-pipeline-overview)
+3. [Inputs](#3-inputs)
+4. [Data quality checks](#4-data-quality-checks)
+5. [Threshold Calibration](#5-threshold-calibration)
+6. [Labeled Output](#6-labeled-output)
+7. [Open questions and assumptions for Natural State Team](#7-open-questions-and-assumptions-for-natural-state-team)
+    - [Questions](#questions)
+    - [Assumptions](#assumptions)
+
 ## 1. Context and Purpose
 
 BirdNET stores a **prediction** (a species and a confidence score) for every 3-second segment of audio. 
@@ -18,6 +30,7 @@ has at least a 99% chance of being correct. A prediction at or above its species
 The scope of this data pipeline starts with taking the *prediction* and *validation* data, automates checking the data for
 quality control, automates the analysis to identify observations in the data, automates the creation of the observation,
 dataset, and finally, stores this data so that can be used for downstream reporting and dashboarding.
+Solid arrows: built by the Tech team. Dotted arrows: outside the Tech team's build.
 
 ```mermaid
 flowchart TD
@@ -39,10 +52,10 @@ flowchart TD
 
     SME -.-> V
     U -.-> P
-    V --> QC
-    P --> QC
-    QC --> P1
-    QC --> P2
+    V -->|new validation data| QC
+    P -->|every new upload| QC
+    QC -->|checked validation| P1
+    QC -->|checked predictions| P2
     P1 --> T
     T --> P2
     P2 --> L
@@ -51,13 +64,13 @@ flowchart TD
 ```
 
  - Step 1. **Data Quality Control** 
-Run the data quality checks defined in section 5. 
+Run the data quality checks defined in section 4. 
 QC on Predictions run every time new predictions are stored.
 QC on Validation and across the two tables run every time thresholds are calculated.
 
  - Step 2. **Threshold Calibration**
 *Overview:* For each species in Validation, calculate a threshold and a support level
-and write them to the Thresholds table. The method is specified in section 6. It 
+and write them to the Thresholds table. The method is specified in section 5. It 
 runs when new validation data arrive, and a data scientist reviews the result before
 it is used. The reasons for each analytical choice are in
 [bird_analysis.md, section 2](bird_analysis.md#2-modelling-from-confidence-scores-to-species-thresholds).
@@ -113,6 +126,8 @@ Only the columns the pipeline requires are listed.
 | `confidence` | number | Greater than 0 and at most 1 |
 | `outcome` | integer | 0 or 1. `1` means the ornithologist judged the prediction correct |
 
+The species values in `common_name` (Predictions) and `commonName` (Validation) must be identical for the same species.
+
 
 ## 4. Data quality checks
 
@@ -160,18 +175,46 @@ The sample data give no STOP. The full rules and the results on the sample are i
 | Both tables | Validation rows can be traced to a prediction | **FLAG** |
 | Both tables | Validation scores are representative of the predictions | **INFO** |
 
-## 6. Calibration
+## 5. Threshold Calibration
 
-**Turning a fitted line into a threshold.** Applied to each species in order:
+**When it runs.** Only when new validation data arrive, or when conditions change (see Step 8 in section 2). It does not run on every upload. It reads the checked Validation table and writes a new version of the Thresholds table, which a data scientist reviews before labeling uses it.
 
-| Rule | Result | Support level |
+**Steps, for each species in Validation**
+
+1. Select the species' rows (`commonName`).
+2. Clip `confidence` to between 0.0001 and 0.9999, then take the logit: `ln(c / (1 - c))`.
+3. Fit a logistic regression of `outcome` on the logit score. Use Firth regression if the species has fewer than 10 correct or fewer than 10 incorrect clips.
+4. Apply the rules below to get a threshold and a support level. The threshold formula is `(ln(0.99 / 0.01) - intercept) / slope`, converted back to a score with `1 / (1 + e^-x)`.
+5. Write one row per species to the Thresholds table (below) as a new version.
+
+**Thresholds table.** One row per species for each version. Key: `species` + `version`.
+
+| Column | Type | Description |
 |---|---|---|
-| The fitted probability is already 99% or more at the lowest validated score | Threshold is that lowest validated score, so every prediction qualifies | Weak |
-| Otherwise the line never reaches 99% within the validated scores, or its slope is not positive | No threshold, so no observations for that species | No threshold |
-| Otherwise | Threshold is the score where the line reaches 99% | Solid if the 95% interval for the slope excludes 0, otherwise Weakly identified |
+| `species` | text | Species, as in `commonName` and `common_name` |
+| `threshold` | number | Lowest `confidence` at which a prediction of this species is an observation. Between 0 and 1. Empty if the species has no threshold |
+| `support_level` | text | One of `Solid`, `Weak`, `Weakly identified`, `No threshold` |
+| `method` | text | `Standard` or `Firth`, the regression used |
+| `date_calculated` | date | When this row was calculated |
+| `version` | integer | Increases by 1 each time calibration is run |
 
+`threshold` is empty if and only if `support_level` is `No threshold`.
 
-## 6. Reference values
+**Settings, not hard-coded:** target probability 0.99; clip bounds 0.0001 and 0.9999; Firth cut-off of 10 clips; slope interval of 95%.
+
+**Edge cases.** A species with no Validation rows gets no threshold. A fit that fails gives a FLAG and no threshold.
+
+**Reference.** The R code in `bird_analysis.Rmd` (sections 2.2 to 2.4) is the reference implementation. The method and the reasons for each choice are in [bird_analysis.md, section 2](bird_analysis.md#2-modelling-from-confidence-scores-to-species-thresholds). The build must reproduce the reference values.
+
+**Threshold and support level (Step 4).** For each species, go through the cases below in this order and use the first one that applies:
+
+| Case | If | The threshold is | The support level is |
+|---|---|---|---|
+| 1 | The fitted probability is at least 99% at the lowest validated score | That lowest validated score, so every prediction qualifies | Weak |
+| 2 | Case 1 does not apply, and the fitted line never reaches 99% within the validated scores, or its slope is not positive | None, so no observations for that species | No threshold |
+| 3 | Neither case 1 nor case 2 applies | The score where the fitted line reaches 99% | Solid if the 95% interval for the slope excludes 0, otherwise Weakly identified |
+
+**Reference values**
 
 The build should reproduce these on the sample data.
 
@@ -184,7 +227,33 @@ The build should reproduce these on the sample data.
 
 In total, 21,315 of 29,491 predictions are observations. Why each threshold was chosen is explained in [bird_analysis.md, section 2](bird_analysis.md#2-modelling-from-confidence-scores-to-species-thresholds), and the decision to use the point estimates in [section 3.3](bird_analysis.md#33-decision-operate-at-the-point-estimates).
 
-## 7. Open questions for Natural State
+
+## 6. Labeled Output
+
+The labeled output is the Predictions table with one new column, `observation`. It has the same rows as Predictions, in the same order, and no existing column is changed.
+
+| Column | Type | Description |
+|---|---|---|
+| `selection` | integer | Unchanged from Predictions |
+| `view` | text | Unchanged from Predictions |
+| `channel` | integer | Unchanged from Predictions |
+| `begin_time_s` | integer | Unchanged from Predictions |
+| `end_time_s` | integer | Unchanged from Predictions |
+| `low_freq_hz` | integer | Unchanged from Predictions |
+| `high_freq_hz` | integer | Unchanged from Predictions |
+| `common_name` | text | Unchanged from Predictions |
+| `species_code` | text | Unchanged from Predictions |
+| `confidence` | number | Unchanged from Predictions. Never rounded or clipped |
+| `begin_path` | text | Unchanged from Predictions |
+| `file_offset_s` | integer | Unchanged from Predictions |
+| `folder` | text | Unchanged from Predictions |
+| `observation` | text | **New.** The species name (`common_name`) if the prediction is an observation, otherwise empty. A prediction is an observation if its species has a threshold and its `confidence` is at or above it |
+
+The key is the same as in Predictions: `begin_path`, `begin_time_s` and `common_name`. The checks on this table before it is published are in Step 6 in section 2.
+
+## 7. Open questions and assumptions for Natural State Team
+
+### Questions
 
 1. **Validation records.** Can they include `begin_path` and `begin_time_s` for each checked clip? Today a clip can only be traced to a prediction by an ambiguous match (see [section 1.3](bird_analysis.md#13-cross-file-checks)).
 2. **BirdNET version.** Can Predictions include `vBirdNET`? Validation has it, and thresholds are only valid for the version they were calibrated on.
@@ -195,4 +264,9 @@ In total, 21,315 of 29,491 predictions are observations. Why each threshold was 
 7. **Changed thresholds.** When thresholds change, should earlier predictions be relabeled?
 8. **Minimum validation.** How many checked clips does a species need before its threshold is trusted? The analysis set no minimum.
 9. **Sensitivity.** The analysis assumed BirdNET's default sensitivity of 1. Is that what Natural State used?
-10. **Proposed rules.** The Firth rule (fewer than 10 clips) and the support levels in section 4 are proposals that match the analysis results. Please confirm them.
+10. **Proposed rules.** The Firth rule (fewer than 10 clips) and the support levels in section 5 are proposals that match the analysis results. Please confirm them.
+11. **Calibration.** These requirements have the Tech team build calibration as a separate job that runs when new validation data arrive, with a data scientist reviewing the result before it is used. Would Natural State rather keep calibration outside the pipeline, with the data scientist supplying the Thresholds table?
+
+### Assumptions
+
+1. **Version control.** Earlier versions of the Thresholds table are kept, following Natural State's version control protocol (assuming this exists, otherwise that would be something to define). No protocol is defined in this document.
