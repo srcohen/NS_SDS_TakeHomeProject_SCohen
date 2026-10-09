@@ -1,4 +1,4 @@
-# Tech requirements: BirdNET observation pipeline
+#  Bird Challenge - Part 2. Tech requirements: BirdNET observation pipeline
 
 Requirements for BirdNET data pipeline to automate and manage data processing, analysis, and output for downstream
 use cases.
