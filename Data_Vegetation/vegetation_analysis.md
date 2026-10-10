@@ -89,13 +89,13 @@ The registered transect lengths are the main plot-level finding. Measured A to B
 - **Savanna is nearly complete.** 29 of the 30 primary plots were surveyed. The one registered primary plot that was not surveyed is the plot registered as not viable.
 - **Shrubland has not been sampled.** None of the 11 planned shrubland plots (6 primary, 5 backup) has been registered or surveyed. Any result from this data covers savanna only.
 - **Quadrat effort matches the design.** 30 plots at 20 quadrats each is 600 quadrats. The 640 rows received include the 2 plots that were surveyed twice, and every survey has all 20 quadrats.
-- **One backup plot was surveyed.** It was registered and surveyed while the non-viable primary plot stayed unsurveyed, which fits the Plot Registration SOP rule that a non-viable plot is replaced with a backup. The data do not state the link, so this is an inference.
+- **One backup plot was surveyed.** One backup plot was registered and surveyed, and the one registered primary plot that was not surveyed is the plot registered as not viable. The data do not say whether the backup replaced it.
 
 ## 6. Map of transect locations
 
 ![Planned vegetation plots by status](figures/transect_map.png)
 
-The map shows every planned point on a satellite background (Esri World Imagery, with the attribution printed on the figure). At this scale a 50 m transect is a point, so each dot is one plot. Surveyed plots are shaded by the number of flags on their survey. Most of the plots that were planned but not registered (grey) are in the northeast.
+The map shows every planned point on a satellite background (Esri World Imagery, with the attribution printed on the figure). At this scale a 50 m transect is a point, so each dot is one plot. Surveyed plots are shaded by the number of flags on their survey. More than half of the plots that were planned but not registered (grey), 11 of 20, are in the eastern part of the map.
 
 ![One surveyed plot against its A to B line](figures/transect_example.png)
 
