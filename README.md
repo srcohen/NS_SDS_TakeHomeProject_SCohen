@@ -5,8 +5,8 @@ A take-home assignment for Natural State's Senior Data Scientist role covering B
 
 | Deliverable | Status |
 |---|---|
-| Bird challenge (BirdNET thresholds) | In progress. Data exploration and QC are done. Modelling: the reference fit for one species (Nightjar) is done; the other three species are next. |
-| Vegetation challenge (data quality report) | Not started. |
+| Bird challenge (BirdNET thresholds) | Done. Analysis and labeled output in `Data_Birds/bird_analysis.md`, requirements for the Tech team in `Data_Birds/Tech_Requirements.md`. |
+| Vegetation challenge (data quality report) | Done. Report in `Data_Vegetation/vegetation_analysis.md`, checks in `Data_Vegetation/vegetation_analysis.ipynb`, requirements for the Tech team in `Data_Vegetation/Tech_Requirements.md`. |
 
 ## Repository layout
 
@@ -16,6 +16,14 @@ Data_Birds/
   bird_analysis.md      Knitted output that GitHub displays
   bird_analysis_files/  Figures produced when knitting
   BirdNET_dev.R         Scratch script used for early exploration
+  Tech_Requirements.md  Requirements note for the Tech team
+  dev/                  Longer earlier draft of the requirements note
+
+Data_Vegetation/
+  vegetation_analysis.ipynb  The data quality checks and the numbers and figures for the report (Python)
+  vegetation_analysis.md     The data quality report that GitHub displays
+  Tech_Requirements.md       Requirements note for the Tech team
+  figures/                   Map and example plot, saved by the notebook
 ```
 
 ## Where the data goes
@@ -29,15 +37,22 @@ Place the files you were given in a folder with the same layout as the original 
   Data Birds/
     birdnet_predictions.csv
     validation_results.csv
+  Data Vegetation/
+    ODK Data Exports/   (the four survey and registration exports)
+    Entity lists/       (vegplots, centroids, species, and the other entity lists)
 ```
 
-Then set the data location in the first code chunk of `Data_Birds/bird_analysis.Rmd`:
+The vegetation report is the exception to "summaries only": it embeds a map of the planned plot locations (`Data_Vegetation/figures/transect_map.png`).
+
+For the bird analysis, set the data location in the first code chunk of `Data_Birds/bird_analysis.Rmd`:
 
 ```r
 data_dir <- "/path/to/your/data folder"
 ```
 
 On my machine this is `/Users/scohen/Documents/NaturalState/Take Home Project`. It is the only line that needs to change.
+
+For the vegetation notebook, set `data_dir` in the second code cell of `Data_Vegetation/vegetation_analysis.ipynb` to the `Data Vegetation` folder inside your data folder.
 
 ## How to reproduce
 
@@ -62,3 +77,18 @@ The bird analysis is written in R, to match how Natural State's Biometrics team 
 This regenerates `bird_analysis.md` and the figures from the raw files. The QC check tables, summary tables and figures are computed when the document is knitted. The field-by-field schema tables and some figures quoted in the surrounding text are written by hand from what the code showed, so recheck them if the data changes.
 
 `logistf` provides the Firth regression used for the species with almost no incorrect validation clips. Further packages will be added here if later sections need them.
+
+### Vegetation notebook (Python)
+
+Python 3.13 was used. The packages and versions are in `requirements.txt`.
+
+1. Create an environment and install the packages once:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+2. Put the data in place and set `data_dir` as described above.
+3. Open `Data_Vegetation/vegetation_analysis.ipynb`, select the `.venv` kernel, and run all cells.
+
+This reruns all 23 checks and rewrites the figures in `Data_Vegetation/figures/`. The last cell updates the "Numbers last computed on" date in `vegetation_analysis.md`. The numbers in the report text are written by hand from the notebook's output, so recheck them if the data changes. The map cell downloads satellite map tiles, so it needs an internet connection.
