@@ -21,7 +21,7 @@ Claude Sonnet 5.5 (Anthropic) was used through Claude Code for coding, drafting 
 ```
 Data_Birds/
   bird_analysis.Rmd     Source for the bird analysis (R Markdown)
-  bird_analysis.md      Knitted output that GitHub displays
+  bird_analysis.md      Knitted bird analysis output that GitHub displays
   bird_analysis_files/  Figures produced when knitting
   BirdNET_dev.R         Scratch script used for early exploration
   Tech_Requirements.md  Requirements note for the Tech team
