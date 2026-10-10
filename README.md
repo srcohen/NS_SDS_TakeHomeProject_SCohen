@@ -8,6 +8,14 @@ A take-home assignment for Natural State's Senior Data Scientist role covering B
 | Bird challenge (BirdNET thresholds) | Done. Analysis and labeled output in `Data_Birds/bird_analysis.md`, requirements for the Tech team in `Data_Birds/Tech_Requirements.md`. |
 | Vegetation challenge (data quality report) | Done. Report in `Data_Vegetation/vegetation_analysis.md`, checks in `Data_Vegetation/vegetation_analysis.ipynb`, requirements for the Tech team in `Data_Vegetation/Tech_Requirements.md`. |
 
+## Time spent
+
+I spent about 9 hours on this, which is 3 to 5 hours over the 4 to 6 hour guideline. Most of the extra time went to setting up my development environments on a personal computer, since I normally do this kind of work on my Native work computer, and to exploring the explanatory power of modeling options for the bird analysis.
+
+## AI assistance
+
+Claude Sonnet 5.5 (Anthropic) was used through Claude Code for coding, drafting language, and cross-document review. I reviewed all output and made all final decisions on processes and final reporting.
+
 ## Repository layout
 
 ```
@@ -28,7 +36,7 @@ Data_Vegetation/
 
 ## Where the data goes
 
-The assignment data is **not in this repository**. I am waiting to hear whether Natural State is happy for it to be published, so it is kept outside the repo and excluded by `.gitignore` (`*.csv`). All code reads the data from a local folder, and the knitted outputs contain summaries only, not rows of data.
+The assignment data is **not published in this repository**. Publishing raw data on GitHub is not best practice and no data security measures were described, so it is kept outside the repo and excluded by `.gitignore` (`*.csv`). To reproduce the work, place the files in a folder with the same structure as the download from Natural State, then change the `data_dir` path in the notebook or R file. All code reads the data from that local folder, and the outputs contain summaries only, not rows of data.
 
 Place the files you were given in a folder with the same layout as the original assignment download:
 
@@ -42,7 +50,7 @@ Place the files you were given in a folder with the same layout as the original 
     Entity lists/       (vegplots, centroids, species, and the other entity lists)
 ```
 
-The vegetation report is the exception to "summaries only": it embeds a map of the planned plot locations (`Data_Vegetation/figures/transect_map.png`).
+The vegetation report includes a map of the planned plot locations on satellite imagery (`Data_Vegetation/figures/transect_map.png`). It does not list coordinates, but the approximate plot locations could be identified from the figure.
 
 For the bird analysis, set the data location in the first code chunk of `Data_Birds/bird_analysis.Rmd`:
 
