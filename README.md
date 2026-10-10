@@ -10,7 +10,7 @@ A take-home assignment for Natural State's Senior Data Scientist role covering B
 
 ## Time spent
 
-I spent about 9 hours on this, which is 3 to 5 hours over the 4 to 6 hour guideline. Most of the extra time went to setting up my development environments on a personal computer, since I normally do this kind of work on my Native work computer, and to exploring the explanatory power of modeling options for the bird analysis.
+I spent about 9 hours on this take-home project, which is 3 to 5 hours over the 4 to 6 hour guideline. Most of the extra time went to setting up my development environments on my personal computer, since I normally do this kind of work on my work computer, and to exploring the explanatory power of modeling options for the bird analysis.
 
 ## AI assistance
 
