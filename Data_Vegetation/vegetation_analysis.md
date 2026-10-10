@@ -24,7 +24,7 @@ All numbers below come from `vegetation_analysis.ipynb`, which holds the code. N
 
 I planned 23 checks, each from a rule in the two SOPs (Herbaceous Vegetation Surveys and Vegetation Plot Registration), a constraint in the ODK forms, or the data itself. The notebook lists every check with its rule and source. Each problem found becomes one row in `flags_table` (`check_id`, `table`, `key`, `detail`).
 
-Two checks use limits that I derived, because the SOPs do not state them:
+Two checks use limits that I derived, because the SOPs give the layout but no tolerance for how far a GPS-measured location can deviate from it:
 
 - **Check 9 (quadrat location).** A quadrat is flagged if it is more than 30 m from the plot midpoint, more than 12 m from the line between endpoints A and B, or more than 5 m past either end of that line. The limits come from the SOP geometry (a 50 m transect, with each quadrat covering 1.5 to 2.5 m from the line) plus the 5 m GPS accuracy the SOP asks for, counted for the quadrat and for both endpoints.
 - **Check 18 (transect length).** The distance from A to B should be 50 m, and from the midpoint to each endpoint 25 m, within the two `-Accuracy` values recorded for the points involved added together.

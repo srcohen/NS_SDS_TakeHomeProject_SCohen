@@ -101,7 +101,7 @@ These are the four sections of the report, each recomputed from the inputs and t
 
 ## 6. Open questions
 
-1. **Derived limits (checks 9 and 18).** The SOPs state none. Natural State should confirm or replace them. They depend on GPS error, so a flag means "review", not "wrong".
+1. **Derived limits (checks 9 and 18).** The SOPs state the layout (a 50 m by 5 m transect, endpoints 25 m from the midpoint, quadrats 1.5 to 2.5 m from the line at 5 m marks) and a GPS accuracy of 5 m or better, but no tolerance for how far a measured location can deviate from that layout. The limits are derived from the layout plus the GPS accuracy. Natural State should confirm or replace them. They depend on GPS error, so a flag means "review", not "wrong".
 2. **Survey time limit (check 6).** The SOPs give none, so only the order of start, end and submission is checked.
 3. **Rejected and repeated surveys.** Two plots were surveyed twice, and one submission of each is `rejected`. Should the dashboard exclude rejected submissions from the summaries?
 4. **Species spelling.** The `species` entity list only holds species already on the project list. There is no taxonomy list for the extra species that field teams type in (`new_missing_canonical`), so check 14 tests the format only, not the spelling.
